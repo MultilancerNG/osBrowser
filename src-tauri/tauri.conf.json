@@ -1,0 +1,47 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "GameBrowser",
+  "version": "0.1.0-preview.4",
+  "identifier": "com.solomongs.stakemode",
+  "build": {
+    "frontendDist": "bootstrap"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "capabilities": []
+    }
+  },
+  "bundle": {
+    "active": true,
+    "createUpdaterArtifacts": false,
+    "targets": [
+      "nsis"
+    ],
+    "icon": [
+      "icons/icon.ico"
+    ],
+    "externalBin": [
+      "binaries/stakemode-sidecar"
+    ],
+    "resources": {
+      "resources/cloakbrowser/": "cloakbrowser/",
+      "resources/firefox/": "firefox/",
+      "resources/playwright/": "playwright/",
+      "windows/tauri-nsis/": "notices/tauri-nsis/"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "offlineInstaller",
+        "silent": true
+      },
+      "nsis": {
+        "compression": "zlib",
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico",
+        "installerHooks": "windows/installer-hooks.nsh",
+        "template": "windows/tauri-nsis/installer.nsi"
+      }
+    }
+  }
+}

@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GameBrowser · Download for Windows</title>
+<meta name="description" content="GameBrowser runs many isolated browser profiles side by side. Pick an admin and the rest follow it. Free portable download for Windows.">
+<meta name="theme-color" content="#0b0f14">
+<meta property="og:title" content="GameBrowser · multi-profile browser workspace">
+<meta property="og:description" content="Run isolated browser profiles side by side. One admin leads, the rest follow.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0f14'/%3E%3Ctext x='16' y='23' text-anchor='middle' font-family='Arial' font-weight='900' font-style='italic' font-size='18' fill='%23c6f432'%3E//%3C/text%3E%3C/svg%3E">
+<style>
+:root{--bg:#0b0f14;--panel:#111720;--line:#263140;--text:#eef2f6;--muted:#94a0b0;--lime:#c6f432;--admin:#a77bff;--follow:#2fd6c6;--green:#3ee07a}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 Inter,"Segoe UI",system-ui,sans-serif}
+a{color:inherit}
+.wrap{max-width:1120px;margin:0 auto;padding:0 24px}
+nav{display:flex;align-items:center;justify-content:space-between;padding:20px 0}
+.brand{font-weight:800;font-size:21px;text-decoration:none;display:flex;gap:8px;align-items:center}
+.brand b{color:var(--lime);font-style:italic;letter-spacing:-3px;font-size:23px}
+nav .links{display:flex;gap:22px;font-size:14px;color:var(--muted)}nav .links a{text-decoration:none}nav .links a:hover{color:var(--text)}
+.hero{display:grid;grid-template-columns:1.05fr 1fr;gap:48px;align-items:center;padding:56px 0 72px}
+h1{font-size:clamp(34px,5vw,54px);line-height:1.08;margin:0 0 18px;letter-spacing:-1px}
+h1 em{font-style:normal;color:var(--lime)}
+.lead{color:#c9d2dc;font-size:18px;margin:0 0 28px;max-width:34em}
+.cta{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+.btn{display:inline-flex;align-items:center;gap:10px;padding:14px 22px;border-radius:10px;font-weight:700;text-decoration:none;border:1px solid #33404f;font-size:15px}
+.btn.primary{background:var(--lime);color:#0b1200;border-color:var(--lime)}.btn.primary:hover{background:#d6ff4f}
+.btn:not(.primary):hover{border-color:#5b6878}
+.btn svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.meta{color:var(--muted);font-size:13px;margin-top:14px}
+/* app mockup */
+.mock{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px;box-shadow:0 30px 80px -30px #000}
+.mock-bar{display:flex;gap:10px;font-size:12px;color:var(--muted);padding:6px 4px 12px;border-bottom:1px solid var(--line);margin-bottom:12px}
+.mock-bar b{color:var(--text)}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);margin-right:4px}
+.tiles{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.tile{border:2px solid var(--follow);border-radius:10px;padding:8px;background:#0d131b}
+.tile.admin{border-color:var(--admin);box-shadow:0 0 24px -8px var(--admin)}
+.tile-top{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:700;margin-bottom:6px}
+.pill{font-size:10px;font-weight:600;padding:1px 7px;border-radius:99px;border:1px solid var(--follow);color:var(--follow)}
+.admin .pill{background:#7d4dff;border-color:var(--admin);color:#fff}
+.url{font-size:10px;color:var(--muted);background:#1a222d;border-radius:5px;padding:3px 7px;margin-bottom:6px}
+.screen{height:66px;border-radius:5px;background:linear-gradient(135deg,#1b2532,#0f151d);position:relative;overflow:hidden}
+.screen::after{content:"";position:absolute;left:10px;right:40%;top:12px;height:8px;border-radius:4px;background:#2a3544;box-shadow:0 16px 0 #222c38,0 30px 0 -1px #222c38}
+.tile-foot{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin-top:6px}
+section{padding:64px 0;border-top:1px solid #18202b}
+h2{font-size:30px;margin:0 0 10px;letter-spacing:-.5px}
+.sub{color:var(--muted);margin:0 0 34px;max-width:40em}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:22px}
+.card h3{margin:0 0 6px;font-size:17px}.card p{margin:0;color:#b6c0cc;font-size:14.5px}
+.card .ic{width:36px;height:36px;border-radius:9px;display:grid;place-items:center;background:#c6f43214;color:var(--lime);margin-bottom:14px;font-weight:800}
+.steps{counter-reset:s;display:grid;gap:14px;max-width:760px;padding:0;margin:0;list-style:none}
+.steps li{counter-increment:s;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px 18px 66px;position:relative}
+.steps li::before{content:counter(s);position:absolute;left:20px;top:17px;width:30px;height:30px;border-radius:50%;background:var(--lime);color:#0b1200;font-weight:800;display:grid;place-items:center}
+.steps b{display:block}.steps span{color:#b6c0cc;font-size:14.5px}
+code{font-family:"Cascadia Code",Consolas,monospace;font-size:13px;background:#1a222d;border:1px solid var(--line);border-radius:5px;padding:1px 6px;word-break:break-all}
+.req{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:28px}
+.req div{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;font-size:14px;color:#b6c0cc}.req b{display:block;color:var(--text)}
+.safe{background:linear-gradient(135deg,#141c27,#111720);border:1px solid var(--line);border-left:3px solid var(--lime);border-radius:12px;padding:22px 24px;color:#c9d2dc}
+.faq details{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 18px;margin-bottom:10px}
+.faq summary{cursor:pointer;font-weight:600}.faq p{color:#b6c0cc;margin:10px 0 0;font-size:14.5px}
+footer{border-top:1px solid #18202b;padding:30px 0 40px;color:var(--muted);font-size:13px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px}
+@media(max-width:900px){.hero{grid-template-columns:1fr;padding-top:24px}.grid{grid-template-columns:1fr 1fr}.req{grid-template-columns:1fr 1fr}nav .links{display:none}}
+@media(max-width:560px){.grid,.req{grid-template-columns:1fr}.btn{width:100%;justify-content:center}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <a class="brand" href="#"><b>//</b>GameBrowser</a>
+    <div class="links"><a href="#features">Features</a><a href="#install">Install</a><a href="#faq">FAQ</a><a href="https://github.com/MultilancerNG/osBrowser">GitHub</a></div>
+  </nav>
+
+  <header class="hero">
+    <div>
+      <h1>One admin leads.<br><em>Every profile follows.</em></h1>
+      <p class="lead">GameBrowser runs many isolated browser profiles side by side on your Windows PC. Pick an admin profile, and the others move with it: same page, same clicks, same scroll. Each profile keeps its own cookies, proxy and screen size.</p>
+      <div class="cta">
+        <a class="btn primary" id="download" href="https://github.com/MultilancerNG/osBrowser/releases/latest/download/GameBrowser-Setup-windows-x64.exe">
+          <svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>Download for Windows</a>
+        <a class="btn" id="download-zip" href="https://github.com/MultilancerNG/osBrowser/releases/latest/download/GameBrowser-windows-x64-portable.zip">Portable ZIP</a>
+        <a class="btn" href="https://github.com/MultilancerNG/osBrowser"><svg viewBox="0 0 24 24"><path d="M9 19c-4 1.5-4-2-6-2.5M15 22v-3.5a3 3 0 0 0-.9-2.3c3-.3 6.1-1.5 6.1-6.6a5.2 5.2 0 0 0-1.4-3.6 4.8 4.8 0 0 0-.1-3.6s-1.1-.3-3.7 1.4a12.6 12.6 0 0 0-6.6 0C5.8 2.1 4.7 2.4 4.7 2.4a4.8 4.8 0 0 0-.1 3.6 5.2 5.2 0 0 0-1.4 3.6c0 5.1 3.1 6.3 6.1 6.6a3 3 0 0 0-.9 2.3V22"/></svg>View source</a>
+      </div>
+      <p class="meta" id="release-meta">Version 0.1.0-preview.4 · Installer 599 MB · Windows 10/11 x64 · Free</p>
+    </div>
+    <div class="mock" aria-hidden="true">
+      <div class="mock-bar"><span>Profiles: <b>4</b></span><span><i class="dot"></i>Running: <b>4</b></span><span>CPU: <b>12%</b></span><span>RAM: <b>1.8 GB</b></span></div>
+      <div class="tiles">
+        <div class="tile admin"><div class="tile-top">Work admin <span class="pill">Admin</span></div><div class="url">https://stake.com</div><div class="screen"></div><div class="tile-foot"><span><i class="dot"></i>Leading</span><span>472 MB</span></div></div>
+        <div class="tile"><div class="tile-top">Work 02 <span class="pill">Follower</span></div><div class="url">https://stake.com</div><div class="screen"></div><div class="tile-foot"><span><i class="dot"></i>Following</span><span>448 MB</span></div></div>
+        <div class="tile"><div class="tile-top">Research <span class="pill">Follower</span></div><div class="url">https://stake.com</div><div class="screen"></div><div class="tile-foot"><span><i class="dot"></i>Following</span><span>452 MB</span></div></div>
+        <div class="tile"><div class="tile-top">Personal <span class="pill">Follower</span></div><div class="url">https://stake.com</div><div class="screen"></div><div class="tile-foot"><span><i class="dot"></i>Following</span><span>450 MB</span></div></div>
+      </div>
+    </div>
+  </header>
+</div>
+
+<section id="features"><div class="wrap">
+  <h2>Built for running many profiles at once</h2>
+  <p class="sub">Everything runs locally on your PC. Nothing is sent to a cloud service.</p>
+  <div class="grid">
+    <div class="card"><div class="ic">◎</div><h3>Admin and followers</h3><p>Choose an admin and, with Auto-follow on, every other running profile follows it straight away.</p></div>
+    <div class="card"><div class="ic">↻</div><h3>Stays connected</h3><p>Followers rejoin on their own after a slow page, a reload or a short drop. Reload all puts everyone back on the same page.</p></div>
+    <div class="card"><div class="ic">♪</div><h3>Hear what's happening</h3><p>A soft tick for every mirrored admin click, and an alert tone the moment a follower disconnects.</p></div>
+    <div class="card"><div class="ic">▣</div><h3>Full Admin View</h3><p>Drive the admin in a full browser frame with tabs and an address bar, and see every follower's status underneath.</p></div>
+    <div class="card"><div class="ic">▯</div><h3>Phone and tablet view</h3><p>Give any Chromium profile an iPhone, Pixel, Galaxy or iPad screen with touch input.</p></div>
+    <div class="card"><div class="ic">≡</div><h3>Fleet tools</h3><p>Bulk create and mass delete, groups and tags, a proxy library, automatic memory budgets, and a readiness badge on every profile.</p></div>
+  </div>
+</div></section>
+
+<section id="install"><div class="wrap">
+  <h2>Install in a minute</h2>
+  <p class="sub">Use the installer for Start menu and desktop shortcuts, or the portable ZIP if you prefer to run it from any folder. Neither needs admin rights.</p>
+  <ol class="steps">
+    <li><b>Download the installer</b><span>Click <a href="https://github.com/MultilancerNG/osBrowser/releases/latest/download/GameBrowser-Setup-windows-x64.exe">Download for Windows</a>. It's about 599 MB because it includes its own browser engines.</span></li>
+    <li><b>Run GameBrowser-Setup-windows-x64.exe</b><span>Windows may show a SmartScreen warning because this preview isn't signed. Choose <b style="display:inline">More info</b>, then <b style="display:inline">Run anyway</b>. It installs to your user folder, so no admin password is needed.</span></li>
+    <li><b>Open GameBrowser</b><span>Use the Start menu or desktop shortcut. A console window opens, followed by the dashboard in your browser. Keep the console open while you work; closing it stops every profile.</span></li>
+    <li><b>Create profiles and pick an admin</b><span>Click <b style="display:inline">New profile</b>, start the profiles, then choose your admin in the Following bar.</span></li>
+  </ol>
+  <p class="meta">Prefer no installer? Download the <a href="https://github.com/MultilancerNG/osBrowser/releases/latest/download/GameBrowser-windows-x64-portable.zip">portable ZIP</a> (811 MB), extract it, and run <code>GameBrowser.exe</code>. Keep the <code>runtime</code>, <code>cloakbrowser</code> and <code>firefox</code> folders next to it.</p>
+  <div class="req">
+    <div><b>Windows 10 or 11</b>64-bit</div>
+    <div><b>8 GB RAM</b>16 GB or more for many profiles</div>
+    <div><b>2 GB disk</b>after unzipping</div>
+    <div><b>Port 8080</b>free (close StakeMode first)</div>
+  </div>
+  <p class="meta">Checksums for every file are in <code>SHA256SUMS.txt</code> on the <a href="https://github.com/MultilancerNG/osBrowser/releases/latest">release page</a>.</p>
+</div></section>
+
+<section><div class="wrap">
+  <div class="safe"><b>Some actions always stay with you.</b> Logins, passwords, 2FA, CAPTCHAs, deposits, withdrawals and bets are never mirrored. A follower that lands on one of those pages switches to manual and waits for you to finish it yourself.</div>
+</div></section>
+
+<section id="faq" class="faq"><div class="wrap">
+  <h2>Questions</h2>
+  <details><summary>Windows says the app is unrecognised. Is that normal?</summary><p>Yes. This is an unsigned preview build, so SmartScreen warns the first time. Choose More info, then Run anyway. You can compare the file's SHA-256 with SHA256SUMS.txt on the release page.</p></details>
+  <details><summary>The dashboard says port 8080 is in use.</summary><p>Another app, usually StakeMode, is using the port. Close it, then start GameBrowser again.</p></details>
+  <details><summary>A follower keeps dropping off.</summary><p>Press Reload all so every profile is on the same page, then Resume. If one profile keeps failing, stop and start it. The yellow advice box on the profile explains the exact cause.</p></details>
+  <details><summary>Where are my profiles stored?</summary><p>In <code>%LOCALAPPDATA%\GameBrowser</code>, separate from the program folder. Installing a newer version over the old one keeps your profiles, and uninstalling leaves them in place too.</p></details>
+  <details><summary>Can I build it myself?</summary><p>Yes. The full source is on <a href="https://github.com/MultilancerNG/osBrowser">GitHub</a> under the Apache 2.0 license. You need Bun 1.3 or newer; the README has the build command.</p></details>
+</div></section>
+
+<div class="wrap"><footer>
+  <span>GameBrowser · based on AliasMode/StakeMode (Apache-2.0)</span>
+  <span>Developed by Solomon Gbeta · <a href="https://solomon.ng">solomon.ng</a></span>
+</footer></div>
+
+<script>
+// Keep the version line in sync with the latest GitHub release when the API is reachable.
+fetch("https://api.github.com/repos/MultilancerNG/osBrowser/releases/latest").then(r => r.ok ? r.json() : null).then(release => {
+  if (!release) return;
+  const asset = (release.assets || []).find(a => a.name === "GameBrowser-Setup-windows-x64.exe"); if (!asset) return;
+  const mb = Math.round(asset.size / 1048576), version = String(release.tag_name || "").replace(/^v/, "");
+  document.getElementById("release-meta").textContent = `Version ${version} · Installer ${mb} MB · Windows 10/11 x64 · Free · ${asset.download_count.toLocaleString()} downloads`;
+}).catch(() => {});
+</script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+[[permission]]
+identifier = "allow-runtime-ready"
+description = "Allows the StakeMode UI to publish non-secret local runtime readiness."
+commands.allow = ["agent_runtime_ready"]
+
+[[permission]]
+identifier = "allow-script-capability"
+description = "Allows the trusted StakeMode window to authenticate script operations."
+commands.allow = ["script_capability"]

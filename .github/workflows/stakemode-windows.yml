@@ -1,0 +1,284 @@
+name: StakeMode Windows preview
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [stakemode]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: stakemode-windows-preview
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    if: github.repository == 'solomongs/AliasMode-Game' && github.event.repository.private == true && github.ref == 'refs/heads/stakemode'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.2.21'
+      - name: Install pinned dependencies
+        run: bun install --frozen-lockfile
+      - name: Check public API documentation
+        run: bun run docs:public:check
+      - name: Typecheck
+        run: bun run typecheck
+      - name: Test local lifecycle and workspace policies
+        shell: bash
+        run: |
+          set -o pipefail
+          bun test 2>&1 | tee test-results.log
+      - name: Test local Python SDK transport
+        run: python -m unittest discover -s sdk -p "test_*.py"
+      - name: Record validated source
+        id: source
+        run: echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+      - name: Preserve validation results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stakemode-validation-results
+          path: test-results.log
+          retention-days: 14
+          if-no-files-found: ignore
+
+  windows:
+    needs: validate
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      actions: read
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          persist-credentials: false
+      - name: Parse installed desktop acceptance script
+        run: |
+          $tokens = $null
+          $parseErrors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'scripts/stakemode-installed-smoke.ps1'), [ref]$tokens, [ref]$parseErrors)
+          if ($parseErrors.Count -gt 0) { throw (($parseErrors | ForEach-Object Message) -join "`n") }
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.2.21'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.89.0'
+      - name: Cache pinned Chromium runtime
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/target/cloakbrowser-cache
+          key: stakemode-cloakbrowser-windows-x64-v1-146.0.7680.177.5-b213795cb32c3169f766c74ce1d0275fc89d3df256de39c04da7fb4c23b7fdbe-03f53661a5c47e7b0a661bee2bce8a0d302b7a60834c328df417561fa0636d80
+      - name: Verify Firefox source provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $run = gh api repos/aliasmode/aliasmode-firefox/actions/runs/36421765188 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.name -cne 'Build and Release' -or $run.path -cne '.github/workflows/build.yml' -or $run.repository.full_name -cne 'aliasmode/aliasmode-firefox' -or $run.head_repository.full_name -cne 'aliasmode/aliasmode-firefox' -or $run.status -cne 'completed' -or $run.conclusion -cne 'success' -or $run.event -cne 'push' -or $run.head_branch -cne 'firefox-engine' -or $run.head_sha -cne '013ebace6cc69c1979c7a86636139e91face6419') { throw 'Firefox source provenance differs from the reviewed upstream pin.' }
+      - uses: actions/download-artifact@v4
+        with:
+          name: AliasModeBuilds-windows-x86_64
+          path: artifacts/firefox
+          github-token: ${{ github.token }}
+          repository: aliasmode/aliasmode-firefox
+          run-id: '36421765188'
+      - name: Verify pinned Firefox payload
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = @(Get-ChildItem artifacts/firefox -Force)
+          if ($files.Count -ne 1 -or $files[0].PSIsContainer -or $files[0].Name -cne 'aliasmode-152.0.4-beta.30-win.x86_64.zip' -or (($files[0].Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { throw 'Unexpected Firefox artifact layout.' }
+          $archive = $files[0].FullName
+          $archiveSha = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          $expanded = Join-Path $env:RUNNER_TEMP 'stakemode-firefox-inspect'
+          Expand-Archive -LiteralPath $archive -DestinationPath $expanded -Force
+          $executables = @(Get-ChildItem $expanded -Recurse -File -Filter aliasmode.exe)
+          if ($executables.Count -ne 1) { throw 'Expected exactly one Firefox executable.' }
+          $exe = $executables[0].FullName
+          $exeSha = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $out = Join-Path $env:RUNNER_TEMP 'stakemode-firefox-version.txt'
+          $err = Join-Path $env:RUNNER_TEMP 'stakemode-firefox-error.txt'
+          $process = Start-Process -FilePath $exe -ArgumentList '--version' -Wait -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+          if ($process.ExitCode -ne 0 -or [IO.File]::ReadAllText($out) -notmatch '152\.0\.4') { throw 'Pinned Firefox version probe failed.' }
+          "ALIASMODE_FIREFOX_ARCHIVE=$archive" | Add-Content $env:GITHUB_ENV
+          "ALIASMODE_FIREFOX_ARCHIVE_SHA256=$archiveSha" | Add-Content $env:GITHUB_ENV
+          "ALIASMODE_FIREFOX_EXECUTABLE_SHA256=$exeSha" | Add-Content $env:GITHUB_ENV
+      - name: Install pinned application dependencies
+        run: |
+          bun install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed.' }
+      - name: Test native Windows extension filesystem policy
+        run: |
+          bun test workspace/extensionManager.test.ts
+          if ($LASTEXITCODE -ne 0) { throw 'Windows extension filesystem tests failed.' }
+      - name: Prepare verified Windows runtimes
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP 'stakemode-bun-baseline.zip'
+          Invoke-WebRequest 'https://github.com/oven-sh/bun/releases/download/bun-v1.2.21/bun-windows-x64-baseline.zip' -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -cne '23f2df1f40d963e5b6104e1a565df992aab8968da5004f460617073843b8b8be') { throw 'Baseline Bun SHA-256 mismatch.' }
+          $root = Join-Path $env:RUNNER_TEMP 'stakemode-bun-baseline'
+          Expand-Archive $archive $root -Force
+          $bins = @(Get-ChildItem $root -Recurse -File -Filter bun.exe)
+          if ($bins.Count -ne 1) { throw 'Invalid baseline Bun archive.' }
+          $version = (& $bins[0].FullName --version).Trim()
+          if ($LASTEXITCODE -ne 0 -or $version -cne '1.2.21') { throw 'Baseline Bun version mismatch.' }
+          & $bins[0].FullName scripts/prepare-windows-bundle.ts
+          if ($LASTEXITCODE -ne 0) { throw 'Windows bundle preparation failed.' }
+      - name: Verify actual Firefox add-on popup and options pages
+        id: firefox_addon
+        continue-on-error: true
+        timeout-minutes: 4
+        run: |
+          $env:ALIASMODE_PLAYWRIGHT_RUNTIME = (Resolve-Path src-tauri/resources/playwright).Path
+          bun scripts/stakemode-firefox-addon-smoke.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Actual Firefox add-on UI smoke failed.' }
+          $report = Get-Content artifacts/STAKEMODE-FIREFOX-ADDON-SMOKE.json -Raw | ConvertFrom-Json
+          if ($report.passed -ne $true -or $report.cleanupConfirmed -ne $true -or $report.source -cne '${{ needs.validate.outputs.source_sha }}') { throw 'Firefox add-on smoke report is missing or unconfirmed.' }
+      - name: Verify packaged browser workspace
+        id: browser_acceptance
+        continue-on-error: true
+        timeout-minutes: 15
+        run: |
+          $env:ALIASMODE_PLAYWRIGHT_RUNTIME = (Resolve-Path src-tauri/resources/playwright).Path
+          bun scripts/stakemode-acceptance.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'StakeMode packaged browser acceptance failed.' }
+          $report = Get-Content artifacts/STAKEMODE-ACCEPTANCE.json -Raw | ConvertFrom-Json
+          if ($null -eq $report) { throw 'Acceptance report missing.' }
+      - name: Preserve browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stakemode-browser-acceptance
+          path: |
+            artifacts/STAKEMODE-ACCEPTANCE.json
+            artifacts/stakemode-screenshots/
+            artifacts/STAKEMODE-FIREFOX-ADDON-SMOKE.json
+            artifacts/stakemode-firefox-addon-smoke/
+          if-no-files-found: ignore
+          retention-days: 14
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          cache-on-failure: true
+          key: stakemode-preview2-native-v3
+      - name: Check native lifecycle and desktop shell
+        run: |
+          cargo test --release --manifest-path src-tauri/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw 'Native lifecycle tests failed.' }
+      - name: Compile Windows x64 NSIS installer
+        run: |
+          bunx tauri build --bundles nsis --no-sign
+          if ($LASTEXITCODE -ne 0) { throw 'Windows installer build failed.' }
+      - name: Verify actual installed NSIS Tauri desktop
+        id: installed_desktop
+        timeout-minutes: 12
+        env:
+          STAKEMODE_SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+        run: |
+          $files = @(Get-ChildItem src-tauri/target/release/bundle/nsis -File -Filter 'GameBrowser_0.1.0-preview.4_x64-setup.exe')
+          if ($files.Count -ne 1) { throw 'Expected one versioned installer for native GUI smoke.' }
+          ./scripts/stakemode-installed-smoke.ps1 -InstallerPath $files[0].FullName
+      - name: Preserve installed desktop evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stakemode-installed-desktop-acceptance
+          path: |
+            artifacts/STAKEMODE-ACCEPTANCE.json
+            artifacts/STAKEMODE-INSTALLED-ACCEPTANCE.json
+            artifacts/stakemode-screenshots/
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Require and merge independent browser and installed acceptance
+        id: merge_acceptance
+        env:
+          STAKEMODE_SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ('${{ steps.firefox_addon.outcome }}' -cne 'success' -or '${{ steps.browser_acceptance.outcome }}' -cne 'success' -or '${{ steps.installed_desktop.outcome }}' -cne 'success') { throw 'Every native browser and installed desktop gate must pass; continued failures are evidence only and cannot be released.' }
+          bun scripts/merge-stakemode-acceptance.mjs --browser artifacts/STAKEMODE-ACCEPTANCE.json --installed artifacts/STAKEMODE-INSTALLED-ACCEPTANCE.json --source $env:STAKEMODE_SOURCE_SHA --output artifacts/STAKEMODE-ACCEPTANCE.json
+          if ($LASTEXITCODE -ne 0) { throw 'Native browser and installed desktop evidence could not be merged for this exact source.' }
+      - name: Collect installer and provenance
+        id: collect_release
+        if: success() && steps.firefox_addon.outcome == 'success' && steps.browser_acceptance.outcome == 'success' && steps.installed_desktop.outcome == 'success' && steps.merge_acceptance.outcome == 'success'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $name = 'GameBrowser_0.1.0-preview.4_x64-setup.exe'
+          $files = @(Get-ChildItem src-tauri/target/release/bundle/nsis -File -Filter '*setup.exe')
+          if ($files.Count -ne 1 -or $files[0].Name -cne $name) { throw 'Expected exactly one correctly branded NSIS installer.' }
+          Copy-Item $files[0].FullName (Join-Path dist $name)
+          $acceptance = Get-Content artifacts/STAKEMODE-ACCEPTANCE.json -Raw | ConvertFrom-Json
+          if ($acceptance.passed -ne $true -or $acceptance.installedDesktop.passed -ne $true -or $acceptance.version -cne '0.1.0-preview.4' -or $acceptance.source -cne '${{ needs.validate.outputs.source_sha }}') { throw 'Final native browser and installed desktop acceptance must match this exact source and pass.' }
+          Copy-Item artifacts/STAKEMODE-ACCEPTANCE.json dist/STAKEMODE-ACCEPTANCE.json
+          Copy-Item src-tauri/generated/browser.json dist/BROWSER-PROVENANCE.json
+          Copy-Item docs/STAKE-MODE.md dist/RELEASE-NOTES.md
+          @(
+            'Product: GameBrowser 0.1.0-preview.4',
+            'Source commit: ${{ needs.validate.outputs.source_sha }}',
+            'Branch: stakemode',
+            'Upstream source: 3830cc4f8350b3b21e57dc962a182e7bdfdb3f05',
+            'Firefox source: 013ebace6cc69c1979c7a86636139e91face6419',
+            'Unsigned developer preview. Manual updates; no live wagers performed.'
+          ) | Set-Content -Encoding ascii dist/BUILD-PROVENANCE.txt
+          $checksums = @(Get-ChildItem dist -File | Sort-Object Name | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.Name)" })
+          $checksums | Set-Content -Encoding ascii dist/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        if: success() && steps.collect_release.outcome == 'success'
+        with:
+          name: StakeMode-Windows-x64-preview
+          path: dist/
+          retention-days: 14
+          if-no-files-found: error
+      - name: Publish private StakeMode preview
+        if: success() && steps.firefox_addon.outcome == 'success' && steps.browser_acceptance.outcome == 'success' && steps.installed_desktop.outcome == 'success' && steps.merge_acceptance.outcome == 'success' && steps.collect_release.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: solomongs/AliasMode-Game
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = gh api repos/solomongs/AliasMode-Game | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $repo.private -ne $true) { throw 'StakeMode preview must remain private.' }
+          $head = gh api repos/solomongs/AliasMode-Game/commits/stakemode --jq .sha
+          if ($LASTEXITCODE -ne 0 -or $head -cne '${{ needs.validate.outputs.source_sha }}') { throw 'Source was superseded; do not publish this installer.' }
+          $tag = 'stakemode-v0.1.0-preview.4'
+          $existingTag = gh api "repos/solomongs/AliasMode-Game/git/ref/tags/$tag" 2>$null
+          if ($LASTEXITCODE -eq 0) { throw 'StakeMode release tag already exists; never overwrite a previous release.' }
+          $global:LASTEXITCODE = 0
+          $assets = @(Get-ChildItem dist -File | ForEach-Object FullName)
+          if ($assets.Count -ne 6) { throw 'Release asset count is invalid.' }
+          gh release create $tag @assets --target '${{ needs.validate.outputs.source_sha }}' --draft --prerelease --title 'GameBrowser 0.1.0-preview.4 — Windows browser workspace' --notes-file docs/STAKE-MODE.md
+          if ($LASTEXITCODE -ne 0) { throw 'Release creation failed; build remains in workflow artifacts.' }
+          $release = gh release view $tag --json targetCommitish,isDraft,isPrerelease,assets | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $release.targetCommitish -cne '${{ needs.validate.outputs.source_sha }}' -or $release.isDraft -ne $true -or $release.isPrerelease -ne $true -or $release.assets.Count -ne 6) { throw 'Draft release identity is invalid.' }
+          $verify = Join-Path $env:RUNNER_TEMP 'stakemode-release-verification'
+          New-Item -ItemType Directory -Force $verify | Out-Null
+          gh release download $tag --dir $verify
+          if ($LASTEXITCODE -ne 0) { throw 'Uploaded release could not be verified.' }
+          foreach ($asset in @(Get-ChildItem dist -File)) {
+            $remote = Join-Path $verify $asset.Name
+            if (-not (Test-Path $remote -PathType Leaf) -or (Get-FileHash $remote -Algorithm SHA256).Hash -cne (Get-FileHash $asset.FullName -Algorithm SHA256).Hash) { throw "Release asset hash mismatch: $($asset.Name)" }
+          }
+          $head = gh api repos/solomongs/AliasMode-Game/commits/stakemode --jq .sha
+          if ($LASTEXITCODE -ne 0 -or $head -cne '${{ needs.validate.outputs.source_sha }}') { throw 'Source changed while uploading; retain release as draft.' }
+          gh release edit $tag --draft=false --prerelease
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed.' }
+          $ref = gh api "repos/solomongs/AliasMode-Game/git/ref/tags/$tag" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $ref.object.type -cne 'commit' -or $ref.object.sha -cne '${{ needs.validate.outputs.source_sha }}') { throw 'Published release tag does not point to the validated source commit.' }

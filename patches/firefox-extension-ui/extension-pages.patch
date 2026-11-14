@@ -1,0 +1,26 @@
+--- a/additions/juggler/content/JugglerFrameChild.sys.mjs
++++ b/additions/juggler/content/JugglerFrameChild.sys.mjs
+@@ -46,8 +46,8 @@
+       this._agents()?.pageAgent.onWindowEvent(event);
+     }));
+ 
+-    if (this.document.documentURI.startsWith('moz-extension://'))
+-      return;
++    // StakeMode: allow the existing Juggler actor to bind installed extension pages.
++    // Package identity and entrypoints remain checked by the local browser bridge.
+ 
+     // Child frame events will be forwarded to related top-level agents.
+     if (this.browsingContext.parent)
+--- a/additions/juggler/content/JugglerFrameChild.jsm
++++ b/additions/juggler/content/JugglerFrameChild.jsm
+@@ -46,8 +46,8 @@
+       this._agents()?.pageAgent.onWindowEvent(event);
+     }));
+ 
+-    if (this.document.documentURI.startsWith('moz-extension://'))
+-      return;
++    // StakeMode: allow the existing Juggler actor to bind installed extension pages.
++    // Package identity and entrypoints remain checked by the local browser bridge.
+ 
+     // Child frame events will be forwarded to related top-level agents.
+     if (this.browsingContext.parent)

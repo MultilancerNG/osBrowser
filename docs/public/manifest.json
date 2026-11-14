@@ -1,0 +1,78 @@
+{
+  "product": "StakeMode",
+  "version": "0.1.0-preview.2",
+  "transport": "loopback HTTP and authenticated WebSocket",
+  "origin": "http://127.0.0.1:8080",
+  "websocket": "ws://127.0.0.1:8080/relay",
+  "authentication": {
+    "bootstrapHeader": "X-StakeMode-Workspace: 1",
+    "apiHeader": "Authorization: Bearer <session token>",
+    "websocket": "first HELLO packet; no URL tokens",
+    "maxPayloadBytes": 32768
+  },
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/workspace/api/bootstrap",
+      "purpose": "Create a bounded dashboard session token"
+    },
+    {
+      "method": "GET",
+      "path": "/workspace/api/snapshot",
+      "purpose": "Profiles, verified metrics, relay state"
+    },
+    {
+      "method": "POST",
+      "path": "/workspace/api/bulk",
+      "purpose": "Create isolated profiles; max 256 total, four concurrent launches"
+    },
+    {
+      "method": "POST",
+      "path": "/workspace/api/start",
+      "purpose": "Launch a profile headlessly"
+    },
+    {
+      "method": "POST",
+      "path": "/workspace/api/stop",
+      "purpose": "Stop an exactly owned browser generation"
+    },
+    {
+      "method": "POST",
+      "path": "/workspace/api/kill",
+      "purpose": "Confirmed force stop using process ownership proof"
+    },
+    {
+      "method": "POST",
+      "path": "/workspace/api/manual",
+      "purpose": "Cancel replay and use direct selected-profile controls"
+    },
+    {
+      "method": "POST",
+      "path": "/workspace/api/role",
+      "purpose": "Choose admin, follower or manual"
+    },
+    {
+      "method": "POST",
+      "path": "/workspace/api/pause",
+      "purpose": "Pause synchronization and invalidate pending events"
+    },
+    {
+      "method": "POST",
+      "path": "/workspace/api/navigate",
+      "purpose": "Navigate an approved exact-origin HTTPS page"
+    },
+    {
+      "method": "POST",
+      "path": "/workspace/api/settings",
+      "purpose": "Configure approved origins and fast/paced dispatch"
+    }
+  ],
+  "constraints": {
+    "credentialReplay": false,
+    "financialReplay": false,
+    "automaticReconnectReplay": false,
+    "staleGenerationReplay": false,
+    "realBrowserStreams": true,
+    "memoryBudgetIsHardCap": false
+  }
+}

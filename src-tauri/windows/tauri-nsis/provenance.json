@@ -1,0 +1,15 @@
+{
+  "upstreamRepository": "https://github.com/tauri-apps/tauri",
+  "upstreamTag": "tauri-cli-v2.11.4",
+  "upstreamCommit": "8909f221d1515955fc843808032bdc5d62209c96",
+  "upstreamPath": "crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi",
+  "upstreamGitBlob": "d372e3c391770cf231db974422a1e4f8adaac3a6",
+  "upstreamSha256": "20f4ecc730defb71f1342eaeaec4021df13be3d843abba0effe88ea5835fa079",
+  "modifiedSha256": "51ad10e1aad64dd8766ffc96ffc5a44b8c161337e5cd2c441ad5afbb1c1841d5",
+  "license": "Apache-2.0 OR MIT",
+  "licenseSha256": {
+    "LICENSE_MIT": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d",
+    "LICENSE_APACHE-2.0": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+  },
+  "modification": "Relocate additional_plugins_path registration before the installer hooks include so early installer hooks can call nsis_tauri_utils. Existing process guards and all other upstream template content are retained."
+}

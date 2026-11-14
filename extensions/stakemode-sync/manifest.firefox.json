@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "StakeMode Synchronizer",
+  "version": "1.0.0",
+  "description": "Authenticated local synchronization of approved nonfinancial browser interactions. Credentials and wagering controls remain manual.",
+  "permissions": ["storage", "tabs"],
+  "host_permissions": ["https://*/*", "http://127.0.0.1/*", "http://localhost/*"],
+  "background": { "scripts": ["background.js"] },
+  "action": { "default_popup": "popup.html", "default_title": "StakeMode Synchronizer" },
+  "content_scripts": [{ "matches": ["https://*/*", "http://127.0.0.1/*", "http://localhost/*"], "js": ["content.js"], "run_at": "document_start", "all_frames": false }],
+  "content_security_policy": { "extension_pages": "script-src 'self'; object-src 'none'; connect-src 'self' ws://127.0.0.1:8080" },
+  "browser_specific_settings": { "gecko": { "id": "synchronizer@stakemode.local", "strict_min_version": "128.0" } }
+}

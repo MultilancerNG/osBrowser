@@ -1,0 +1,27 @@
+StakeMode Firefox extension UI compatibility patch
+Patch ID: stakemode-firefox-extension-ui-v1
+
+The original and modified JugglerFrameChild.jsm and
+JugglerFrameChild.sys.mjs files in this directory are derived from:
+https://github.com/aliasmode/aliasmode-firefox
+Commit: 013ebace6cc69c1979c7a86636139e91face6419
+Source paths: additions/juggler/content/JugglerFrameChild.{jsm,sys.mjs}
+
+These source files retain their Mozilla Public License, version 2.0,
+notices. The license is available at https://mozilla.org/MPL/2.0/ .
+Complete original and modified source for the changed files is included
+here. The unified change is in extension-pages.patch.
+
+The sole behavior change removes the actor's early return for
+moz-extension:// documents, allowing its existing page actor to bind to
+installed extension pages. No native executable, fingerprint engine,
+extension manifest, web-accessible-resource rule, or browser permission
+is modified by this patch. The local browser controller still validates
+the assigned extension origin and declared popup/options entrypoint.
+
+The build verifies both original module hashes against this source pin
+and records every original/modified archive and module SHA-256 in
+APPLIED-PATCH.json beside this notice. It repacks optimized jars as
+ordinary Gecko-supported ZIP jars, preserving all untouched entry local
+records and compressed bytes. The original verified engine distribution
+remains identified by its upstream archive and executable hashes.

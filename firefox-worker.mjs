@@ -1,0 +1,465 @@
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { lstat, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { createRequire } from "node:module";
+import { isAbsolute, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { MAX_BYTES, VERSION, operatePersistentContext } from "./playwright-worker.mjs";
+
+const ROOT = fileURLToPath(new URL(".", import.meta.url));
+const require = createRequire(import.meta.url);
+const ERROR_MESSAGES = {
+  invalid_request: "Firefox owner request is invalid",
+  invalid_response: "Firefox owner response is invalid",
+  operation_failed: "Firefox owner operation failed",
+  runtime_unavailable: "Firefox owner runtime is unavailable",
+  timeout: "Firefox owner operation timed out",
+};
+
+function typed(code, details) {
+  const error = new Error(ERROR_MESSAGES[code] || ERROR_MESSAGES.operation_failed);
+  error.code = code;
+  if (details) error.details = details;
+  return error;
+}
+
+async function sha256File(path) {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return hash.digest("hex");
+}
+
+function isLoopbackEndpoint(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:"
+      && (url.hostname === "127.0.0.1" || url.hostname === "::1")
+      && !!url.port
+      && url.pathname === "/";
+  } catch {
+    return false;
+  }
+}
+
+function validConfig(value) {
+  return value && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizedAddonUUIDs(value) {
+  if (!validConfig(value) || Object.keys(value).length > 256) throw typed("invalid_request");
+  const result = Object.create(null);
+  for (const [id, uuid] of Object.entries(value)) {
+    if (!id || id.length > 200 || !/^[a-zA-Z0-9@._{}-]+$/.test(id)
+      || ["__proto__", "prototype", "constructor"].includes(id)
+      || typeof uuid !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(uuid)) throw typed("invalid_request");
+    result[id] = uuid.toLowerCase();
+  }
+  return result;
+}
+
+export function observedFirefoxCaptureUrl(value) {
+  try {
+    const url = new URL(value);
+    if ((url.protocol !== "http:" && url.protocol !== "https:")
+      || url.searchParams.has("__aliasmode_fingerprint__")) return undefined;
+    return url;
+  } catch {}
+}
+
+function cleanCamouConfig(config) {
+  for (const key of Object.keys(process.env)) {
+    if (/^CAMOU_CONFIG(?:_\d+)?$/i.test(key)) delete process.env[key];
+  }
+  const serialized = JSON.stringify(config);
+  for (let offset = 0; offset < serialized.length; offset += 2047) {
+    process.env[`CAMOU_CONFIG_${Math.floor(offset / 2047) + 1}`] = serialized.slice(offset, offset + 2047);
+  }
+}
+
+async function readConfig() {
+  const chunks = [];
+  let bytes = 0;
+  for await (const chunk of process.stdin) {
+    bytes += chunk.length;
+    if (bytes > MAX_BYTES) throw typed("invalid_request");
+    chunks.push(chunk);
+  }
+  let input;
+  try { input = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { throw typed("invalid_request"); }
+  if (input?.version !== VERSION
+    || typeof input.profileId !== "string" || !input.profileId
+    || typeof input.executablePath !== "string" || !input.executablePath
+    || typeof input.executableSha256 !== "string" || !/^[a-f0-9]{64}$/.test(input.executableSha256)
+    || typeof input.userDataDir !== "string" || !input.userDataDir
+    || !validConfig(input.config)
+    || !input.owner || !isLoopbackEndpoint(input.owner.endpoint)
+    || typeof input.owner.token !== "string" || !input.owner.token
+    || typeof input.owner.generation !== "string" || !input.owner.generation
+    || (input.proxy !== undefined && (!validConfig(input.proxy) || typeof input.proxy.server !== "string" || !input.proxy.server))
+    || (input.networkMode !== undefined && !["direct", "system", "proxy"].includes(input.networkMode))
+    || (input.addonDirs !== undefined && (!Array.isArray(input.addonDirs) || input.addonDirs.length > 32
+      || input.addonDirs.some(path => typeof path !== "string" || !isAbsolute(path) || path.includes("\0"))))
+    || (input.args !== undefined && (!Array.isArray(input.args) || input.args.some((arg) => typeof arg !== "string")))
+    || (input.headless !== undefined && typeof input.headless !== "boolean")) {
+    throw typed("invalid_request");
+  }
+  if (input.addonUUIDs !== undefined) normalizedAddonUUIDs(input.addonUUIDs);
+  return input;
+}
+
+function sameToken(expected, actual) {
+  if (typeof actual !== "string") return false;
+  const a = Buffer.from(expected);
+  const b = Buffer.from(actual);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+async function readRequest(request) {
+  const chunks = [];
+  let bytes = 0;
+  for await (const chunk of request) {
+    bytes += chunk.length;
+    if (bytes > MAX_BYTES) throw typed("invalid_request");
+    chunks.push(chunk);
+  }
+  let value;
+  try { value = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { throw typed("invalid_request"); }
+  if (value?.version !== VERSION || typeof value.operation !== "string" || !value.payload || typeof value.payload !== "object") {
+    throw typed("invalid_request");
+  }
+  return value;
+}
+
+function powerShellLiteral(value) {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+async function browserPidOf(context, input) {
+  const serverBrowser = context?._connection?.toImpl?.(context)?._browser;
+  const serverProcess = serverBrowser?.options?.browserProcess?.process;
+  if (Number.isSafeInteger(serverProcess?.pid) && serverProcess.pid > 0) return serverProcess.pid;
+  const browser = context.browser?.();
+  const launched = typeof browser?.process === "function"
+    ? browser.process()
+    : browser?._process ?? browser?._browserProcess;
+  if (Number.isSafeInteger(launched?.pid) && launched.pid > 0) return launched.pid;
+  if (process.platform !== "win32") throw typed("runtime_unavailable");
+  const executable = powerShellLiteral(input.executablePath);
+  const directory = powerShellLiteral(input.userDataDir);
+  const command = `$exe = ${executable}; $directory = ${directory}; $profile = '(?i)(?:^|\\s)-profile\\s+(?:"' + [regex]::Escape($directory) + '"|' + [regex]::Escape($directory) + ')(?=\\s|$)'; Get-CimInstance Win32_Process -Filter "ParentProcessId = ${process.pid}" | Where-Object { $_.ExecutablePath -ieq $exe -and $_.CommandLine -match $profile } | Select-Object -First 1 -ExpandProperty ProcessId`;
+  try {
+    const { stdout } = await promisify(execFile)("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], { windowsHide: true });
+    const pid = Number(String(stdout).trim());
+    if (Number.isSafeInteger(pid) && pid > 0) return pid;
+  } catch {}
+  throw typed("runtime_unavailable");
+}
+
+function responseBody(response) {
+  const body = JSON.stringify(response);
+  if (Buffer.byteLength(body) <= MAX_BYTES) return body;
+  return JSON.stringify({ version: VERSION, ok: false, error: { code: "operation_failed", message: ERROR_MESSAGES.operation_failed } });
+}
+
+function send(response, status, body) {
+  response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+  response.end(body);
+}
+
+export function firefoxLaunchOptions(input) {
+  const mode = input.networkMode;
+  if ((mode === "direct" || mode === "system") && input.proxy) throw typed("invalid_request");
+  if (mode === "proxy" && !input.proxy) throw typed("invalid_request");
+  if (mode !== undefined && !["direct", "system", "proxy"].includes(mode)) throw typed("invalid_request");
+  const options = {
+    executablePath: input.executablePath,
+    viewport: null,
+    ...(input.proxy ? {
+      proxy: input.proxy,
+      firefoxUserPrefs: {
+        "media.peerconnection.ice.proxy_only": true,
+        "media.peerconnection.ice.default_address_only": true,
+        "media.peerconnection.ice.no_host": true,
+      },
+    } : {
+      // No proxy: keep WebRTC on the default route so a system VPN's IP is used, not the real NIC.
+      firefoxUserPrefs: { "media.peerconnection.ice.default_address_only": true },
+    }),
+    ...(input.headless === undefined ? {} : { headless: input.headless }),
+    ...(input.args ? { args: input.args } : {}),
+    ...(mode ? { firefoxUserPrefs: {
+      ...(input.proxy || mode === "system" ? {
+        "media.peerconnection.ice.proxy_only": true,
+        "media.peerconnection.ice.default_address_only": true,
+        "media.peerconnection.ice.no_host": true,
+      } : { "media.peerconnection.ice.default_address_only": true }),
+      "network.proxy.type": mode === "direct" ? 0 : mode === "system" ? 5 : 1,
+    } } : {}),
+  };
+  if (input.addonUUIDs !== undefined) {
+    options.firefoxUserPrefs["extensions.webextensions.uuids"] = JSON.stringify(normalizedAddonUUIDs(input.addonUUIDs));
+  }
+  // The pinned Juggler build defaults to strategy 0, which makes reload append
+  // a duplicate session-history entry (Playwright #22640 / Mozilla #1832341).
+  // Keep Fission enabled and use normal site isolation; do not emulate Back.
+  return { ...options, firefoxUserPrefs: { ...options.firefoxUserPrefs, "fission.webContentIsolationStrategy": 1 } };
+}
+
+export function firefoxManagedConfig(input) {
+  const addons = input.addonDirs ?? [];
+  if (!Array.isArray(addons) || addons.length > 32 || addons.some(path => typeof path !== "string" || !isAbsolute(path) || path.includes("\0"))) throw typed("invalid_request");
+  // Only the validated local extension manager may supply addon paths.
+  return { ...input.config, addons: [...addons] };
+}
+
+export async function prepareManagedFirefoxPrefs(input) {
+  const managedUUIDs = input.addonUUIDs === undefined ? undefined : normalizedAddonUUIDs(input.addonUUIDs);
+  const value = firefoxLaunchOptions(input).firefoxUserPrefs["network.proxy.type"];
+  const target = join(input.userDataDir, "user.js");
+  async function readPrefs(path, maxBytes) {
+    try {
+      const info = await lstat(path);
+      if (!info.isFile() || info.isSymbolicLink() || info.size > maxBytes) throw typed("operation_failed");
+      return await readFile(path, "utf8");
+    } catch (error) { if (error?.code !== "ENOENT") throw error; return ""; }
+  }
+  const contents = await readPrefs(target, 1024 * 1024);
+  const mergedUUIDs = managedUUIDs === undefined ? undefined : Object.create(null);
+  if (mergedUUIDs) {
+    // prefs.js is JavaScript, not JSON. Read only literal user_pref JSON strings;
+    // never evaluate profile-controlled expressions or load browser code here.
+    const sources = [await readPrefs(join(input.userDataDir, "prefs.js"), 4 * 1024 * 1024), contents];
+    for (const source of sources) for (const line of source.split(/\r?\n/)) {
+      const match = /^\s*user_pref\(\s*["']extensions\.webextensions\.uuids["']\s*,\s*("(?:[^"\\]|\\.)*")\s*\)\s*;\s*(?:\/\/.*)?$/.exec(line);
+      if (!match) continue;
+      try {
+        const mapping = normalizedAddonUUIDs(JSON.parse(JSON.parse(match[1])));
+        for (const [id, uuid] of Object.entries(mapping)) mergedUUIDs[id] = uuid;
+      } catch { /* Malformed old mappings do not become trusted runtime origins. */ }
+    }
+    for (const [id, uuid] of Object.entries(managedUUIDs)) mergedUUIDs[id] = uuid;
+    if (Object.keys(mergedUUIDs).length > 256) throw typed("operation_failed");
+  }
+  const kept = contents.split(/\r?\n/).filter(line => !(
+    (input.networkMode !== undefined && /^\s*user_pref\(\s*["']network\.proxy\.type["']\s*,/.test(line))
+    || (mergedUUIDs && /^\s*user_pref\(\s*["']extensions\.webextensions\.uuids["']\s*,/.test(line))
+    || /^\s*user_pref\(\s*["']fission\.webContentIsolationStrategy["']\s*,/.test(line)
+  ));
+  if (input.networkMode !== undefined) kept.push(`user_pref("network.proxy.type", ${JSON.stringify(value)});`);
+  if (mergedUUIDs) kept.push(`user_pref("extensions.webextensions.uuids", ${JSON.stringify(JSON.stringify(mergedUUIDs))});`);
+  kept.push('user_pref("fission.webContentIsolationStrategy", 1);');
+  const temporary = `${target}.${randomBytes(12).toString("hex")}.tmp`;
+  try {
+    await writeFile(temporary, kept.join("\n") + "\n", { encoding: "utf8", flag: "wx", mode: 0o600 });
+    await rename(temporary, target);
+  } finally { await rm(temporary, { force: true }); }
+  return mergedUUIDs;
+}
+
+async function launchOwner(input) {
+  if (await sha256File(input.executablePath) !== input.executableSha256) throw typed("operation_failed");
+  const addonUUIDs = await prepareManagedFirefoxPrefs(input);
+  cleanCamouConfig(firefoxManagedConfig(input));
+  let runtime;
+  try { runtime = await import(pathToFileURL(join(ROOT, "node_modules", "playwright-core", "index.mjs")).href); } catch { throw typed("runtime_unavailable"); }
+  if (!runtime.firefox) throw typed("runtime_unavailable");
+  try {
+    return await runtime.firefox.launchPersistentContext(input.userDataDir, firefoxLaunchOptions(addonUUIDs === undefined ? input : { ...input, addonUUIDs }));
+  } catch {
+    throw typed("operation_failed");
+  }
+}
+
+async function run() {
+  const input = await readConfig();
+  if (!process.argv.includes(`--aliasmode-firefox-owner=${input.owner.generation}`)) throw typed("invalid_request");
+  const context = await launchOwner(input);
+  const browser = context.browser?.();
+  let browserPid;
+  try { browserPid = await browserPidOf(context, input); }
+  catch (error) { await context.close().catch(() => {}); throw error; }
+  const pageIds = new WeakMap();
+  let nextPageId = 1;
+  const observedOrigins = new Set();
+  // Closed-origin storage last read by capture; a page load of that origin invalidates it.
+  const storageCache = new Map();
+  let observedTelegramClient;
+  const observeUrl = (value) => {
+    const url = observedFirefoxCaptureUrl(value);
+    if (!url) return;
+    observedOrigins.add(url.origin);
+    storageCache.delete(url.origin);
+    if (url.origin === "https://web.telegram.org") {
+      if (url.pathname === "/a" || url.pathname.startsWith("/a/")) observedTelegramClient = "a";
+      if (url.pathname === "/k" || url.pathname.startsWith("/k/")) observedTelegramClient = "k";
+    }
+  };
+  const observePage = (page) => {
+    try { observeUrl(page.url()); } catch {}
+    page.on?.("framenavigated", (frame) => { try { observeUrl(frame.url()); } catch {} });
+  };
+  for (const page of context.pages()) observePage(page);
+  context.on?.("page", observePage);
+  let closed = false;
+  let closing = false;
+  let queue = Promise.resolve();
+  const pageTargets = () => context.pages().map((page) => {
+    let id = pageIds.get(page);
+    if (!id) { id = `page-${nextPageId++}`; pageIds.set(page, id); }
+    let url = "";
+    try { url = page.url(); } catch {}
+    return { id, url };
+  });
+  let playwrightServer;
+  let playwrightEndpoint;
+  const closePlaywrightServer = async () => {
+    const current = playwrightServer;
+    playwrightServer = undefined;
+    playwrightEndpoint = undefined;
+    await current?.close();
+  };
+  const initializePlaywrightServer = async () => {
+    if (playwrightEndpoint) return playwrightEndpoint;
+    const serverContext = context?._connection?.toImpl?.(context);
+    const serverBrowser = serverContext?._browser;
+    if (!serverBrowser) throw typed("runtime_unavailable");
+    let PlaywrightServer;
+    try { ({ PlaywrightServer } = require(join(ROOT, "node_modules", "playwright-core", "lib", "remote", "playwrightServer.js"))); }
+    catch { throw typed("runtime_unavailable"); }
+    const bridge = new PlaywrightServer({
+      mode: "launchServerShared",
+      path: `/${randomBytes(32).toString("hex")}`,
+      maxConnections: Infinity,
+      preLaunchedBrowser: serverBrowser,
+    });
+    try {
+      playwrightEndpoint = await bridge.listen(0, "127.0.0.1");
+      playwrightServer = bridge;
+      return playwrightEndpoint;
+    } catch (error) {
+      await bridge.close().catch(() => {});
+      throw error;
+    }
+  };
+  let server;
+  const closeServer = () => !server
+    ? Promise.resolve()
+    : new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  const stopContext = async () => {
+    if (closing) return;
+    closing = true;
+    closed = true;
+    try {
+      await closePlaywrightServer().catch(() => {});
+      await context.close();
+    } catch (error) {
+      closing = false;
+      closed = false;
+      throw error;
+    }
+  };
+  const shutdown = async () => {
+    try {
+      await stopContext();
+    } finally {
+      await closePlaywrightServer().catch(() => {});
+      await closeServer().catch(() => {});
+    }
+  };
+  const operation = async (name, payload) => {
+    if (closed) throw typed("runtime_unavailable");
+    if (payload.ownerGeneration !== input.owner.generation) throw typed("runtime_unavailable");
+    if (name === "session-capture") {
+      const seed = payload.captureSeed;
+      if (seed === undefined || (seed && typeof seed === "object" && !Array.isArray(seed) && Array.isArray(seed.origins))) {
+        const origins = new Set([...(seed?.origins ?? []), ...observedOrigins]);
+        payload = {
+          ...payload,
+          captureSeed: {
+            ...(seed ?? {}),
+            origins: [...origins],
+            ...(seed?.telegramClient || !observedTelegramClient ? {} : { telegramClient: observedTelegramClient }),
+          },
+        };
+      }
+    }
+    if (name === "close") return null;
+    if (name === "status") return {
+      generation: input.owner.generation,
+      directory: input.userDataDir,
+      executablePath: input.executablePath,
+      pid: process.pid,
+      browserPid,
+      profileId: input.profileId,
+      pageTargets: pageTargets(),
+      hasPages: context.pages().length > 0,
+    };
+    if (name === "bring-to-front") {
+      const targets = pageTargets();
+      const target = payload.targetId
+        ? targets.find((item) => item.id === payload.targetId)
+        : targets[0];
+      const page = target && context.pages().find((item) => pageIds.get(item) === target.id);
+      if (!page) throw typed("operation_failed");
+      await page.bringToFront();
+      return null;
+    }
+    if (name === "detach") return null;
+    if (name === "playwright-endpoint") return { endpoint: await initializePlaywrightServer() };
+    if (name === "session-restore") storageCache.clear();
+    return operatePersistentContext(browser, context, name, payload, { nativeStorage: true, storageCache });
+  };
+
+  server = createServer((request, response) => {
+    void (async () => {
+      if (request.method !== "POST" || request.url !== "/"
+        || !sameToken(input.owner.token, request.headers.authorization?.replace(/^Bearer /, ""))) {
+        send(response, 401, responseBody({ version: VERSION, ok: false, error: { code: "runtime_unavailable", message: ERROR_MESSAGES.runtime_unavailable } }));
+        return;
+      }
+      try {
+        const requestValue = await readRequest(request);
+        const runOperation = queue.then(() => operation(requestValue.operation, requestValue.payload));
+        queue = runOperation.catch(() => {});
+        const result = await runOperation;
+        if (requestValue.operation === "close") {
+          await stopContext();
+          send(response, 200, responseBody({ version: VERSION, ok: true, result }));
+          await closeServer();
+          return;
+        }
+        send(response, 200, responseBody({ version: VERSION, ok: true, result }));
+      } catch (error) {
+        const code = ERROR_MESSAGES[error?.code] ? error.code : "operation_failed";
+        send(response, 400, responseBody({ version: VERSION, ok: false, error: { code, message: ERROR_MESSAGES[code], ...(error?.details ? { details: error.details } : {}) } }));
+      }
+    })();
+  });
+  const address = new URL(input.owner.endpoint);
+  try {
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(Number(address.port), address.hostname, resolve);
+    });
+  } catch (error) {
+    await context.close().catch(() => {});
+    throw error;
+  }
+  const ready = { version: VERSION, ok: true, result: { endpoint: input.owner.endpoint, pid: process.pid, browserPid, generation: input.owner.generation } };
+  process.stdout.write(`${JSON.stringify(ready)}\n`);
+  browser?.once?.("disconnected", () => { if (!closing) void shutdown(); });
+  context.once?.("close", () => { if (!closing) void shutdown(); });
+}
+
+if (process.argv.some((argument) => argument.startsWith("--aliasmode-firefox-owner="))) {
+  try {
+    await run();
+  } catch (error) {
+    const code = ERROR_MESSAGES[error?.code] ? error.code : "operation_failed";
+    process.stdout.write(`${JSON.stringify({ version: VERSION, ok: false, error: { code, message: ERROR_MESSAGES[code] } })}\n`);
+    process.exitCode = 1;
+  }
+}
