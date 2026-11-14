@@ -30,9 +30,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Baseline Bun builds an exe that also runs on CPUs without AVX2.
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.14
+          bun-download-url: https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-windows-x64-baseline.zip
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -80,7 +81,7 @@ jobs:
           foreach ($dir in 'runtime\node_modules', 'cloakbrowser', 'firefox', 'notices') { if (-not (Test-Path (Join-Path $env:GB_ROOT $dir))) { throw "Runtime bundle is missing $dir" } }
 
       - name: Compile GameBrowser.exe
-        run: bun build --compile --target=bun-windows-x64-baseline --define=ALIASMODE_COMPILED=true --external=playwright-core --external=chromium-bidi --external=electron StakeMode-cli.ts --outfile ${{ env.GB_ROOT }}\GameBrowser.exe
+        run: bun build --compile --define=ALIASMODE_COMPILED=true --external=playwright-core --external=chromium-bidi --external=electron StakeMode-cli.ts --outfile ${{ env.GB_ROOT }}\GameBrowser.exe
 
       - name: Add this build's dashboard, relay and sync extension
         shell: pwsh
