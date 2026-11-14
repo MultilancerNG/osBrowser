@@ -57,9 +57,25 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           New-Item -ItemType Directory -Force C:\gbdl, $env:GB_ROOT, $env:GB_OUT | Out-Null
-          gh release download runtime-windows-x64 --repo $env:GITHUB_REPOSITORY --pattern GameBrowser-runtime-windows-x64.zip --dir C:\gbdl
-          if ($LASTEXITCODE -ne 0) { throw 'Runtime bundle download failed. Upload GameBrowser-runtime-windows-x64.zip to a release tagged runtime-windows-x64.' }
-          7z x C:\gbdl\GameBrowser-runtime-windows-x64.zip "-o$env:GB_ROOT" -y | Out-Null
+          # The bundle is stored as GameBrowser-runtime-windows-x64.zip.partNN pieces plus a .sha256 file
+          # (single large uploads are unreliable); a single .zip asset is accepted too.
+          gh release download runtime-windows-x64 --repo $env:GITHUB_REPOSITORY --pattern 'GameBrowser-runtime-windows-x64.zip*' --dir C:\gbdl
+          if ($LASTEXITCODE -ne 0) { throw 'Runtime bundle download failed. Upload the bundle to the release tagged runtime-windows-x64.' }
+          $zip = 'C:\gbdl\GameBrowser-runtime-windows-x64.zip'
+          $parts = @(Get-ChildItem C:\gbdl -Filter 'GameBrowser-runtime-windows-x64.zip.part*' | Sort-Object Name)
+          if ($parts.Count) {
+            $out = [IO.File]::Create($zip)
+            try { foreach ($part in $parts) { $in = [IO.File]::OpenRead($part.FullName); try { $in.CopyTo($out) } finally { $in.Dispose() } } } finally { $out.Dispose() }
+            Write-Host "Joined $($parts.Count) parts"
+          }
+          if (-not (Test-Path $zip)) { throw 'Runtime bundle not found in the release.' }
+          $expected = Join-Path C:\gbdl 'GameBrowser-runtime-windows-x64.zip.sha256'
+          if (Test-Path $expected) {
+            $want = (Get-Content $expected -Raw).Trim().Split()[0].ToLower(); $have = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+            if ($want -ne $have) { throw "Runtime bundle checksum mismatch ($have, expected $want)" }
+            Write-Host 'Runtime bundle checksum verified'
+          }
+          7z x $zip "-o$env:GB_ROOT" -y | Out-Null
           if ($LASTEXITCODE -ne 0) { throw 'Runtime bundle extraction failed.' }
           foreach ($dir in 'runtime\node_modules', 'cloakbrowser', 'firefox', 'notices') { if (-not (Test-Path (Join-Path $env:GB_ROOT $dir))) { throw "Runtime bundle is missing $dir" } }
 
