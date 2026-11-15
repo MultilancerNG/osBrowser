@@ -24,6 +24,8 @@ export interface WorkspacePolicy {
   mobileView?: { width: number; height: number };
   /** RAM budget and Chromium heap follow this machine's memory instead of ramMb/heapMb. */
   autoResources?: boolean;
+  /** "native" opens a real, resizable browser window instead of a hidden one. */
+  windowMode?: "native";
 }
 export const DEFAULT_WORKSPACE_POLICY: WorkspacePolicy = {
   ramMb: 2048, heapMb: 512, headless: true, urls: [], manual: true, budgetAction: "pause-sync",
@@ -49,9 +51,10 @@ export function normalizeWorkspacePolicy(value: Partial<WorkspacePolicy>, fallba
   const networkMode = merged.networkMode === undefined ? undefined : normalizeNetworkMode(merged.networkMode);
   const mobileView = merged.mobileView === undefined || merged.mobileView === null ? undefined : validateMobileView(merged.mobileView);
   if (merged.autoResources !== undefined && typeof merged.autoResources !== "boolean") throw new Error("automatic resources must be boolean");
+  if (merged.windowMode !== undefined && merged.windowMode !== null && merged.windowMode !== "native" && merged.windowMode !== "dashboard") throw new Error("window mode must be native or dashboard");
   if (!Array.isArray(merged.urls) || merged.urls.length > 8) throw new Error("workspace accepts at most eight startup URLs per profile");
   return { ramMb: merged.ramMb, heapMb: merged.heapMb, headless: true, manual: merged.manual,
-    budgetAction: merged.budgetAction, urls: [...new Set(merged.urls.map(normalizeWorkspaceUrl))], ...(networkMode ? { networkMode } : {}), ...(mobileView ? { mobileView } : {}), ...(merged.autoResources ? { autoResources: true } : {}) };
+    budgetAction: merged.budgetAction, urls: [...new Set(merged.urls.map(normalizeWorkspaceUrl))], ...(networkMode ? { networkMode } : {}), ...(mobileView ? { mobileView } : {}), ...(merged.autoResources ? { autoResources: true } : {}), ...(merged.windowMode === "native" ? { windowMode: "native" as const } : {}) };
 }
 /** Catch parser details locally: an invalid input error must never echo credentials. */
 export function parseWorkspaceProxy(value: string | ProxySpec | null | undefined): ProxySpec | null {

@@ -22,10 +22,14 @@
   let lastReplaySeq = 0;
   let localSeq = 0;
   let observedUrl = '';
+  let layoutTimer = null;
+  let lastHover = { element: null, at: 0 };
+  const hoverSelector = '[aria-haspopup]:not([aria-haspopup="false"]),[aria-expanded],[data-hover],[data-dropdown],[data-tooltip]';
+  let lastLayout = '';
   const replayIds = new Set();
   const maxSelector = 512;
   const maxValue = 512;
-  const sensitive = /(?:^|[^a-z0-9])(?:pass(?:word|code)?|pwd|secret|token|api[\s_-]*key|auth(?:entication|orize|orisation|orization)?|log[\s_-]*in|sign[\s_-]*in|sign[\s_-]*up|register|credential|username|user[\s_-]*name|email|phone|pin|code|otp|2fa|mfa|two[\s_-]*factor|verification|verify|captcha|turnstile|hcaptcha|recaptcha|challenge|deposit|withdraw(?:al)?|payout|payment|pay|purchase|buy|sell|checkout|wallet|bank|card|amount|stake|wager|bet(?:s|ting)?|place[\s_-]*bet|cash[\s_-]*out|trade|transfer|send[\s_-]*money|tip)(?:$|[^a-z0-9])/i;
+  const sensitive = /(?:^|[^a-z0-9])(?:pass(?:word|code)?|pwd|secret|token|api[\s_-]*key|auth(?:entication|orize|orisation|orization)?|log[\s_-]*in|sign[\s_-]*in|sign[\s_-]*up|register|credential|username|user[\s_-]*name|email|phone|pin|(?:promo|bonus|verification|security|auth|sms|2fa)[\s_-]*code|one[\s_-]*time|otp|2fa|mfa|two[\s_-]*factor|verification|verify|captcha|turnstile|hcaptcha|recaptcha|challenge|deposit|withdraw(?:al)?|payout|payment|pay|purchase|buy|sell|checkout|wallet|bank|card|amount|wager|stake[\s_-]*(?:amount|input|value|size)|place[\s_-]*(?:a[\s_-]*)?bets?|bet[\s_-]*(?:slip|amount|now|button|input|value|size)|(?:max|min|auto)[\s_-]*bet|cash[\s_-]*out|trade|transfer|send[\s_-]*money|tip)(?:$|[^a-z0-9])/i;
   const sensitivePath = /(?:^|\/)(?:login|sign[-_]?in|sign[-_]?up|register|auth|oauth|verify|verification|2fa|mfa|captcha|challenge|deposit|withdraw(?:al)?|payout|payment|checkout|wallet|cashier)(?:\/|$)/i;
   const editableTypes = new Set(['text', 'search']);
   const interactiveSelector = 'button,a[href],input,textarea,select,[role="button"],[role="link"],[role="tab"],[contenteditable="true"]';
@@ -45,7 +49,7 @@
   function localPause(reason, notify = true) {
     config = { ...config, role: 'manual', active: false };
     generation++;
-    clearTimeout(scrollTimer); scrollTimer = null;
+    clearTimeout(scrollTimer); scrollTimer = null; clearTimeout(layoutTimer); layoutTimer = null;
     if (notify) send({ type: 'MANUAL_OVERRIDE', enabled: true, reason: compact(reason) });
   }
   function configure(packet) {
@@ -53,13 +57,27 @@
     if (packet.origins.some((origin) => { try { const url = new URL(origin); const local = url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname); return (url.protocol !== 'https:' && !local) || url.origin !== origin; } catch { return true; } })) return localPause('Invalid approved origin');
     const role = packet.paused === true ? 'manual' : packet.role;
     const changed = config.epoch !== packet.epoch || config.role !== role || config.active !== (packet.active !== false) || config.connected !== (packet.connected !== false) || config.origins.join('|') !== packet.origins.join('|');
-    if (changed) { generation++; clearTimeout(scrollTimer); scrollTimer = null; lastReplaySeq = 0; replayIds.clear(); }
+    if (changed) { generation++; clearTimeout(scrollTimer); scrollTimer = null; clearTimeout(layoutTimer); layoutTimer = null; lastReplaySeq = 0; replayIds.clear(); }
     config = { connected: packet.connected !== false, role, origins: [...packet.origins], epoch: packet.epoch, active: packet.active !== false };
-    if (changed) reportPage();
+    if (changed) { reportPage(); if (role === 'admin') { lastLayout = ''; reportLayout(); } }
     if (sensitivePath.test(location.pathname) || hasChallenge()) localPause('Authentication or verification page requires manual control');
   }
   function hasChallenge() {
     return !!document.querySelector('iframe[src*="challenges.cloudflare.com"],iframe[src*="hcaptcha.com"],iframe[src*="recaptcha"],.cf-turnstile,.h-captcha,.g-recaptcha,[data-sitekey],input[autocomplete="one-time-code"],input[type="password"]');
+  }
+  // The administrator's viewport size drives every follower in its group.
+  function reportLayout() {
+    clearTimeout(layoutTimer);
+    layoutTimer = setTimeout(() => {
+      layoutTimer = null;
+      if (!isReady('admin')) return;
+      const width = Math.round(window.innerWidth), height = Math.round(window.innerHeight);
+      if (width < 200 || height < 150 || width > 7680 || height > 4320) return;
+      const key = `${width}x${height}`;
+      if (key === lastLayout) return;
+      lastLayout = key;
+      send({ type: 'LAYOUT', width, height });
+    }, 300);
   }
   function reportPage() {
     const current = pageIdentity();
@@ -207,11 +225,15 @@
     const ticket = generation;
     replaying = true;
     try {
-      if (packet.action === 'scroll') {
+      if (packet.action === 'key') {
+        if (packet.value !== 'Escape') return rejectReplay(packet, 'Only Escape is mirrored');
+        const target = document.activeElement instanceof HTMLElement ? document.activeElement : document.body;
+        for (const type of ['keydown', 'keyup']) target.dispatchEvent(new KeyboardEvent(type, { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true, composed: true }));
+      } else if (packet.action === 'scroll') {
         if (![packet.x, packet.y].every((v) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1_000_000)) return rejectReplay(packet, 'Invalid scroll coordinates');
         window.scrollTo({ left: packet.x, top: packet.y, behavior: 'instant' });
       } else {
-        if (!['click', 'input'].includes(packet.action) || typeof packet.selector !== 'string' || packet.selector.length > maxSelector) return rejectReplay(packet, 'Invalid action selector');
+        if (!['click', 'input', 'hover'].includes(packet.action) || typeof packet.selector !== 'string' || packet.selector.length > maxSelector) return rejectReplay(packet, 'Invalid action selector');
         const unquoted = packet.selector.replace(/"(?:[^"\\]|\\.)*"/g, '""');
         if (/[.<`{};]/.test(unquoted) || /:(?!nth-of-type\([1-9]\d{0,2}\))/i.test(unquoted) || sensitiveText(packet.selector)) return rejectReplay(packet, 'Unsafe action selector');
         let matches;
@@ -221,7 +243,13 @@
         if (targetSensitive(element)) return rejectReplay(packet, 'Sensitive interaction requires manual control');
         if (!isVisible(element) || !fingerprintMatches(element, packet.fingerprint)) return rejectReplay(packet, 'Follower target verification failed');
         if (ticket !== generation || !isReady('follower')) return rejectReplay(packet, 'Manual override invalidated the action');
-        if (packet.action === 'input') {
+        if (packet.action === 'hover') {
+          const box = element.getBoundingClientRect(), point = { clientX: box.left + box.width / 2, clientY: box.top + box.height / 2, bubbles: true, composed: true };
+          for (const type of ['pointerover', 'pointerenter', 'mouseover', 'mouseenter', 'pointermove', 'mousemove']) {
+            const init = { ...point, bubbles: !type.endsWith('enter') };
+            element.dispatchEvent(type.startsWith('pointer') ? new PointerEvent(type, { ...init, pointerType: 'mouse' }) : new MouseEvent(type, init));
+          }
+        } else if (packet.action === 'input') {
           if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) || (element instanceof HTMLInputElement && !editableTypes.has(element.type)) || typeof packet.value !== 'string' || packet.value.length > maxValue) return rejectReplay(packet, 'Target cannot receive synchronized text');
           element.focus({ preventScroll: true });
           const prototype = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
@@ -247,6 +275,26 @@
     } catch { rejectReplay(packet, 'Follower replay failed; use manual control'); }
     finally { replaying = false; }
   }
+  // Menus that open on hover: mirror the hover on controls that declare a popup.
+  function onHover(event) {
+    if (!event.isTrusted || replaying || !isReady('admin')) return;
+    const raw = event.composedPath?.()[0] ?? event.target;
+    const element = raw instanceof Element ? raw.closest(hoverSelector) : null;
+    if (!element || (lastHover.element === element && Date.now() - lastHover.at < 1500)) return;
+    lastHover = { element, at: Date.now() };
+    if (sensitivePath.test(location.pathname) || hasChallenge() || targetSensitive(element) || !isVisible(element)) return;
+    const selector = selectorFor(element);
+    if (!selector) return;
+    const packet = { type: 'ACTION', id: crypto.randomUUID(), seq: ++localSeq, epoch: config.epoch, ...pageIdentity(), action: 'hover', selector, fingerprint: metadata(element) };
+    send(extensionApi ? { type: 'CAPTURE_ACTION', action: packet } : packet);
+  }
+  // Escape closes modals and menus; it is the only key mirrored.
+  function onEscape(event) {
+    if (!event.isTrusted || replaying || event.key !== 'Escape' || !isReady('admin')) return;
+    if (sensitivePath.test(location.pathname) || hasChallenge()) return;
+    const packet = { type: 'ACTION', id: crypto.randomUUID(), seq: ++localSeq, epoch: config.epoch, ...pageIdentity(), action: 'key', value: 'Escape' };
+    send(extensionApi ? { type: 'CAPTURE_ACTION', action: packet } : packet);
+  }
   const onClick = (event) => capture(event, 'click');
   const onInput = (event) => capture(event, 'input');
   const onScrollIntent = (event) => {
@@ -261,6 +309,9 @@
     reportPage();
     if (config.role !== 'manual' && (sensitivePath.test(location.pathname) || hasChallenge())) localPause('Authentication or verification requires manual control');
   };
+  window.addEventListener('resize', reportLayout, true);
+  document.addEventListener('mouseover', onHover, true);
+  document.addEventListener('keydown', onEscape, true);
   document.addEventListener('click', onClick, true);
   document.addEventListener('input', onInput, true);
   document.addEventListener('scroll', scrollCapture, true);
@@ -280,6 +331,8 @@
     clearInterval(pageWatcher); clearTimeout(scrollTimer);
     document.removeEventListener('click', onClick, true);
     document.removeEventListener('input', onInput, true);
+    window.removeEventListener('resize', reportLayout, true); clearTimeout(layoutTimer);
+    document.removeEventListener('mouseover', onHover, true); document.removeEventListener('keydown', onEscape, true);
     document.removeEventListener('scroll', scrollCapture, true);
     document.removeEventListener('wheel', onScrollIntent, true);
     document.removeEventListener('touchmove', onScrollIntent, true);

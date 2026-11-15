@@ -72,8 +72,8 @@
       const page = cleanUrl(tab.url);
       if (page && state.origins.includes(page.origin)) send({ type: 'PAGE', ...page });
       else {
+        // The relay marks this transient and restores the role when an approved page returns.
         send({ type: 'PAGE', origin: '', url: '' });
-        if (state.role !== 'manual') pause('Active page is outside the approved origin', true);
       }
       await publish();
     } catch { pause('Active page is unavailable', true); }
@@ -150,8 +150,12 @@
     } else if (message.type === 'ACK') {
       if (!state.connected || !Number.isSafeInteger(message.epoch) || message.epoch !== state.epoch) return false;
       send({ type: 'ACK', id: String(message.id ?? '').slice(0, 80), epoch: message.epoch, status: message.status === 'applied' ? 'applied' : 'rejected', ...(typeof message.reason === 'string' ? { reason: message.reason.slice(0, 160) } : {}) });
-      if (message.status !== 'applied') pause('Follower target verification failed', true);
+      // Rejections are counted by the relay (soft failures); the follower stays attached.
     } else if (message.type === 'PAGE') void reportPage(sender.tab.id);
+    else if (message.type === 'LAYOUT') {
+      const width = Number(message.width), height = Number(message.height);
+      if (state.connected && state.role === 'admin' && Number.isInteger(width) && Number.isInteger(height) && width >= 200 && width <= 7680 && height >= 150 && height <= 4320) send({ type: 'LAYOUT', width, height });
+    }
     return false;
   });
   api.tabs.onActivated.addListener((info) => {
@@ -165,7 +169,17 @@
     if (change.status === 'loading' || change.url) { generation++; void publish(); }
     if (change.status === 'complete' || change.url) void reportPage();
   });
-  api.tabs.onRemoved.addListener((tabId) => { if (tabId === activeTab) { activeTab = null; pause('Active tab closed', true); } });
+  api.tabs.onRemoved.addListener((tabId) => {
+    if (tabId !== activeTab) return;
+    activeTab = null; generation++;
+    void (async () => {
+      try {
+        const tabs = await api.tabs.query({ active: true, lastFocusedWindow: true });
+        const next = tabs[0]?.id ?? (await api.tabs.query({}))[0]?.id ?? null;
+        if (Number.isInteger(next)) { activeTab = next; await reportPage(next); }
+      } catch { /* No tab left; the relay sees the disconnect. */ }
+    })();
+  });
   (async () => {
     try {
       const response = await fetch(api.runtime.getURL('config.json'), { cache: 'no-store' });

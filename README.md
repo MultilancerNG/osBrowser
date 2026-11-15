@@ -6,6 +6,10 @@ GameBrowser is a Windows desktop workspace for running many isolated browser pro
 
 ## What it does
 
+- One admin per group: each profile group follows only its own admin
+- Real browser window mode with every native browser feature; the admin's window size is copied to its followers
+- New tabs, popups, hover menus, Escape and alert/confirm/prompt answers follow the admin
+- Full view behaves like a browser: drag, double/right-click, shortcuts, zoom, find, uploads and downloads
 - Live grid of every running profile, with the admin outlined in purple and followers in teal
 - Full Admin View with browser tabs, an address bar and a strip of connected followers
 - Auto-follow: choose an admin and every other running profile follows it

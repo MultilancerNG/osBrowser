@@ -39,7 +39,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Test relay, budgets and version
-        run: bun test workspace/sync.relay.test.ts workspace/sync.alerts.test.ts workspace/autoBudget.test.ts workspace/displayPolicy.test.ts version.test.ts
+        run: bun test workspace/sync.relay.test.ts workspace/sync.alerts.test.ts workspace/sync.groups.test.ts workspace/eventPolicy.stake.test.ts extensions/stakemode-sync workspace/autoBudget.test.ts workspace/displayPolicy.test.ts version.test.ts
 
       - name: Read version
         id: version

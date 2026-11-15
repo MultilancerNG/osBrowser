@@ -8,6 +8,7 @@ GameBrowser is a modified version of AliasMode/StakeMode (Copyright 2026 Xreache
 - Sounds for mirrored admin clicks and follower disconnects; plain-language error advice in banners and on profiles.
 - Readiness status per profile, mass delete, phone/tablet view mode, and automatic RAM/JS heap budgets.
 - New server routes: reload-all, follow (pause/resume), save-session, force-followers, view.
+- Per-group admins, real browser window mode, admin layout/resize sync, tab/popup/hover/Escape/dialog mirroring, browser-style Full view input (drag, double/right-click, shortcuts, zoom, find, uploads, downloads), narrowed sync block-list.
 - Build and Pages workflows for this repository.
 
 Sensitive actions (login, passwords, 2FA, CAPTCHA, deposits, withdrawals, bets) are still never mirrored.

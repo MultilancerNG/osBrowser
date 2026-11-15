@@ -16,10 +16,15 @@ export interface SyncProfileConfig {
 }
 export interface ManualControl {
   profileId: string;
-  kind: "click" | "key" | "text" | "scroll";
+  kind: "click" | "key" | "text" | "scroll" | "move" | "down" | "up" | "dblclick" | "contextmenu" | "zoom" | "find";
   x?: number;
   y?: number;
   key?: string;
+  /** Held modifier keys for "key" (Control+C, Shift+Tab, ...). */
+  modifiers?: Array<"Control" | "Shift" | "Alt" | "Meta">;
+  button?: "left" | "right" | "middle";
+  /** Page zoom for "zoom" (0.25-3). */
+  scale?: number;
   text?: string;
   deltaX?: number;
   deltaY?: number;
@@ -101,10 +106,17 @@ export function safeManualControl(value: unknown): ManualControl {
   const v = value as Record<string, unknown>;
   if (typeof v.profileId !== "string" || !/^[a-zA-Z0-9_-]{1,64}$/.test(v.profileId)) throw new Error("Profile is invalid");
   const finite = (n: unknown, max: number) => typeof n === "number" && Number.isFinite(n) && Math.abs(n) <= max;
-  if (v.kind === "click" && finite(v.x, 8192) && finite(v.y, 8192) && Number(v.x) >= 0 && Number(v.y) >= 0) return v as unknown as ManualControl;
+  const point = finite(v.x, 8192) && finite(v.y, 8192) && Number(v.x) >= 0 && Number(v.y) >= 0;
+  if (v.kind === "click" && point) return v as unknown as ManualControl;
+  if (["move", "dblclick", "contextmenu"].includes(String(v.kind)) && point) return { profileId: v.profileId, kind: v.kind, x: v.x, y: v.y } as ManualControl;
+  if ((v.kind === "down" || v.kind === "up") && point && (v.button === undefined || ["left", "right", "middle"].includes(String(v.button)))) return { profileId: v.profileId, kind: v.kind, x: v.x, y: v.y, button: (v.button as ManualControl["button"]) ?? "left" } as ManualControl;
+  if (v.kind === "zoom" && typeof v.scale === "number" && Number.isFinite(v.scale) && v.scale >= 0.25 && v.scale <= 3) return { profileId: v.profileId, kind: "zoom", scale: Math.round(v.scale * 100) / 100 } as ManualControl;
+  if (v.kind === "find" && typeof v.text === "string" && v.text.length >= 1 && v.text.length <= 200 && !v.text.includes("\u0000")) return { profileId: v.profileId, kind: "find", text: v.text } as ManualControl;
+  if (v.kind === "key" && typeof v.key === "string" && Array.isArray(v.modifiers) && v.modifiers.length && v.modifiers.length <= 3 && v.modifiers.every(m => ["Control", "Shift", "Alt", "Meta"].includes(String(m)))
+    && /^(?:[a-zA-Z0-9]|[=+\-]|Backspace|Delete|Enter|Tab|Escape|Space|Insert|Arrow(?:Up|Down|Left|Right)|Home|End|PageUp|PageDown|F(?:[1-9]|1[0-2]))$/.test(v.key)) return { profileId: v.profileId, kind: "key", key: v.key, modifiers: [...new Set(v.modifiers)] } as ManualControl;
   if (v.kind === "scroll" && finite(v.deltaX, 3000) && finite(v.deltaY, 3000)) return v as unknown as ManualControl;
   if (v.kind === "text" && typeof v.text === "string" && v.text.length <= 4096 && !v.text.includes("\u0000")) return v as unknown as ManualControl;
-  if (v.kind === "key" && typeof v.key === "string" && /^(?:[a-zA-Z0-9]|Backspace|Delete|Enter|Tab|Escape|Space|Arrow(?:Up|Down|Left|Right)|Home|End|PageUp|PageDown)$/.test(v.key)) return v as unknown as ManualControl;
+  if (v.kind === "key" && typeof v.key === "string" && /^(?:[a-zA-Z0-9]|Backspace|Delete|Enter|Tab|Escape|Space|Insert|Arrow(?:Up|Down|Left|Right)|Home|End|PageUp|PageDown|F(?:[1-9]|1[0-2]))$/.test(v.key)) return { profileId: v.profileId, kind: "key", key: v.key } as ManualControl;
   throw new Error("Control is invalid or exceeds its limit");
 }
 

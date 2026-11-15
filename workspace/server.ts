@@ -5,9 +5,9 @@ import type { Launcher } from "../launcher.ts";
 import type { ProfileStore } from "../store.ts";
 import type { Profile } from "../types.ts";
 import { assertSafeProfileId } from "../profile-id.ts";
-import { BrowserBridge } from "./browserBridge.ts";
+import { BrowserBridge, validateLayout } from "./browserBridge.ts";
 import { ProcessManager, type BulkProfileInput, type WorkspaceProfileView } from "./processManager.ts";
-import { SyncRelay, type RelayTransport } from "./syncRelay.ts";
+import { SyncRelay, type RelayTransport, UNGROUPED } from "./syncRelay.ts";
 import { approvedOrigin, browserCommand, browsingUrl, boundedJson, isLoopback, MAX_PACKET_BYTES, MAX_VISIBLE_PROFILES, safeManualControl, sameToken, sessionToken, trustedLocalRequest, WORKSPACE_PORT, type LiveFrame, type ManualControl, type SyncRole } from "./protocol.ts";
 import { generateSyncExtension, removeSyncExtension } from "../extensions/stakemode-sync/syncExtension.ts";
 import { ExtensionManager, type PreparedExtensionLaunch } from "./extensionManager.ts";
@@ -93,8 +93,10 @@ export class StakeModeWorkspace {
   constructor(private options: StakeModeWorkspaceOptions) {
     mkdirSync(join(options.stateRoot, "workspace"), { recursive: true, mode: 0o700 });
     this.settingsFile = join(options.stateRoot, "workspace", "settings.json");
-    this.relay = new SyncRelay({ pinnedOrigins: [MAIN_SITE_ORIGIN], onAdminPage: (_admin, page) => this.followAdminPage(page),
-      onSync: id => { if (!this.changingManual && this.manager?.getProfile(id)?.manual) { this.changingManual = true; try { this.manager.setManual(id, false); } finally { this.changingManual = false; } } },
+    this.relay = new SyncRelay({ pinnedOrigins: [MAIN_SITE_ORIGIN], onAdminPage: (admin, page) => this.followAdminPage(admin, page),
+      groupFor: id => { try { return this.library?.get(id).groupId ?? null; } catch { return null; } },
+      onAdminLayout: (admin, layout) => this.followAdminLayout(admin, layout),
+      onSync: id => { this.catchUpFollower(id); if (!this.changingManual && this.manager?.getProfile(id)?.manual) { this.changingManual = true; try { this.manager.setManual(id, false); } finally { this.changingManual = false; } } },
       onAdminAction: (adminId, action, followers) => this.publishDashboard({ type: "SYNC_ACTION", profileId: adminId, action, followers, at: Date.now() }),
       onChange: () => this.publishSnapshot(), onManual: (id, reason) => {
       if (reason !== "manual_startup") console.error(`[GameBrowser] sync: ${id} switched to manual (${reason})`);
@@ -122,7 +124,8 @@ export class StakeModeWorkspace {
     this.bridge = (options.bridgeFactory ?? (config => new BrowserBridge(config)))({
       getLaunch: id => this.manager.getLaunch(id),
       getConfig: id => this.relay.configFor(id),
-      getViewport: id => { const profile = this.manager.getProfile(id); return profile ? profile.mobileView ? { ...profile.mobileView, mobile: true } : { width: profile.screenWidth, height: profile.screenHeight } : undefined; },
+      // A native window sizes itself (the operator can resize it); only phone view is emulated there.
+      getViewport: id => { const profile = this.manager.getProfile(id); return profile ? profile.mobileView ? { ...profile.mobileView, mobile: true } : profile.windowMode === "native" ? undefined : { width: profile.screenWidth, height: profile.screenHeight } : undefined; },
       canControl: id => {
         const profile = this.manager.getProfile(id), status = this.relay.statuses().find(row => row.profileId === id);
         return !!profile && !!this.manager.getLaunch(id) && (profile.manual || status?.role === "admin");
@@ -136,12 +139,17 @@ export class StakeModeWorkspace {
       // onNavigation below still hands it to manual if it leaves the site or opens a sensitive page.
       beforeBrowserAction: (id, command) => {
         const config = this.relay.configFor(id);
-        if (config?.role === "admin" && command && (command.action === "reload" || (command.action === "navigate" && (() => {
-          try { const url = new URL(String(command.url)); return config.origins.includes(url.origin) && !url.username && !url.password && !SENSITIVE_PATH.test(url.pathname); } catch { return false; }
-        })()))) return;
+        // The admin keeps leading for every browser-bar action (tabs, back/forward, reload) unless it
+        // opens a page outside the approved site or a sensitive page; onNavigation re-checks real pages.
+        const inSite = (value: unknown) => { try { const url = new URL(String(value)); return config!.origins.includes(url.origin) && !url.username && !url.password && !SENSITIVE_PATH.test(url.pathname); } catch { return false; } };
+        if (config?.role === "admin" && command && (["reload", "back", "forward", "stop", "select-tab", "close-tab"].includes(command.action)
+          || (command.action === "navigate" && inSite(command.url))
+          || (command.action === "new-tab" && (!command.url || command.url === "about:blank" || inSite(command.url))))) return;
         this.relay.manual(id, "operator_navigation");
       },
       onNavigation: (id, value) => {
+        // New tabs start on about:blank and browser-internal pages; those are not navigation away.
+        if (!/^https?:/i.test(String(value))) return;
         try {
           const url = new URL(value), config = this.relay.configFor(id);
           const leaving = !config?.origins.includes(url.origin) || url.username || url.password;
@@ -149,7 +157,11 @@ export class StakeModeWorkspace {
           else if (leaving || url.search || url.hash) this.relay.manual(id, "manual_navigation");
         } catch { this.relay.manual(id, "manual_navigation"); }
       },
-      onBrowserState: browser => this.publishProfilePacket(browser.profileId, { type: "BROWSER_STATE", browser }),
+      onBrowserState: browser => { this.publishProfilePacket(browser.profileId, { type: "BROWSER_STATE", browser }); if (this.relay.configFor(browser.profileId)?.role === "admin") this.followAdminTabs(browser.profileId); },
+      onDialog: (id, dialog) => this.dialogOpened(id, dialog),
+      onFileChooser: (id, request) => this.publishDashboard({ type: "FILE_CHOOSER", profileId: id, multiple: request.multiple }),
+      onDownload: (id, download) => this.publishDashboard({ type: "DOWNLOAD", profileId: id, ...download }),
+      onDialogClosed: (id, dialogId, answer) => this.dialogClosed(id, dialogId, answer),
       contentScriptPath: join(process.env.STAKEMODE_SYNC_EXTENSION_ROOT ?? join(import.meta.dir, "..", "extensions", "stakemode-sync"), "content.js"),
     });
     this.management = new ManagementRoutes({ manager: this.manager, bridge: this.bridge, relay: this.relay, extensions: this.extensions, library: this.library,
@@ -221,16 +233,83 @@ export class StakeModeWorkspace {
     return !!profile && !!this.manager.getLaunch(id) && !profile.overBudget && (profile.state === "running" || profile.state === "manual");
   }
   /** Keep followers on the administrator's page. Sensitive paths stay manual. */
-  private followAdminPage(page: string): void {
+  /** Last administrator viewport per group, re-applied to profiles that join later. */
+  private groupLayouts = new Map<string, { width: number; height: number }>();
+  private layoutTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private followAdminLayout(adminId: string, layout: { width: number; height: number }): void {
+    const group = this.relay.groupOf(adminId);
+    this.groupLayouts.set(group, layout);
+    clearTimeout(this.layoutTimers.get(group));
+    this.layoutTimers.set(group, setTimeout(() => {
+      this.layoutTimers.delete(group);
+      for (const follower of this.relay.followers(group)) if (follower.connected) void this.bridge.applyLayout(follower.profileId, layout).catch(() => {});
+    }, 250));
+  }
+  private tabSignatures = new Map<string, string>();
+  private tabTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private followAdminTabs(adminId: string): void {
+    const tabs = this.bridge.tabLayout(adminId);
+    if (!tabs) return;
+    const signature = `${tabs.urls.length}|${tabs.active}|${tabs.urls.join(",")}`;
+    if (this.tabSignatures.get(adminId) === signature) return;
+    this.tabSignatures.set(adminId, signature);
+    clearTimeout(this.tabTimers.get(adminId));
+    this.tabTimers.set(adminId, setTimeout(() => {
+      this.tabTimers.delete(adminId);
+      const latest = this.bridge.tabLayout(adminId);
+      if (!latest || this.relay.configFor(adminId)?.role !== "admin") return;
+      for (const follower of this.relay.followers(this.relay.groupOf(adminId))) if (follower.connected) void this.bridge.mirrorTabs(follower.profileId, latest).catch(() => {});
+    }, 500));
+  }
+  /** A profile (re)joined as follower: give it the group's current size and tabs. */
+  private catchUpFollower(id: string): void {
+    setTimeout(() => {
+      if (this.relay.configFor(id)?.role !== "follower") return;
+      const group = this.relay.groupOf(id), layout = this.groupLayouts.get(group), admin = this.relay.adminOf(group);
+      if (layout) void this.bridge.applyLayout(id, layout).catch(() => {});
+      const tabs = admin ? this.bridge.tabLayout(admin) : undefined;
+      if (tabs && tabs.urls.length > 1) void this.bridge.mirrorTabs(id, tabs).catch(() => {});
+    }, 300);
+  }
+  /** Recent administrator dialog answers per group, replayed on matching follower dialogs. */
+  private dialogAnswers = new Map<string, { type: string; message: string; accept: boolean; text?: string; at: number }>();
+  private dialogOpened(id: string, dialog: { id: string; type: string; message: string; defaultValue: string }): void {
+    const config = this.relay.configFor(id);
+    if (config?.role === "follower") {
+      const answer = this.dialogAnswers.get(this.relay.groupOf(id));
+      if (answer && Date.now() - answer.at < 10_000 && answer.type === dialog.type && answer.message === dialog.message) { void this.bridge.answerDialog(id, dialog.id, answer.accept, answer.text); return; }
+    }
+    this.publishDashboard({ type: "DIALOG", profileId: id, dialog });
+    this.publishSnapshot();
+  }
+  private dialogClosed(id: string, dialogId: string, answer: { type: string; message: string; accept: boolean; text?: string }): void {
+    this.publishDashboard({ type: "DIALOG_CLOSED", profileId: id, dialogId });
+    this.publishSnapshot();
+    if (this.relay.configFor(id)?.role !== "admin") return;
+    const status = this.relay.statuses().find(row => row.profileId === id);
+    let sensitive = false; try { sensitive = !!status?.page && SENSITIVE_PATH.test(new URL(status.page).pathname); } catch { sensitive = true; }
+    if (sensitive) return; // dialogs on login/payment pages are never mirrored
+    const group = this.relay.groupOf(id), record = { ...answer, at: Date.now() };
+    this.dialogAnswers.set(group, record);
+    for (const follower of this.relay.followers(group)) {
+      for (const pending of this.bridge.pendingDialogs(follower.profileId)) {
+        if (pending.type === answer.type && pending.message === answer.message) void this.bridge.answerDialog(follower.profileId, pending.id, answer.accept, answer.text);
+      }
+    }
+  }
+  private followAdminPage(adminId: string, page: string): void {
     let url: URL;
     try { url = new URL(page); } catch { return; }
     if (SENSITIVE_PATH.test(url.pathname) || !this.relay.origins.includes(url.origin)) return;
-    for (const follower of this.relay.followers()) {
+    for (const follower of this.relay.followers(this.relay.groupOf(adminId))) {
       if (!follower.connected || follower.page === page) continue;
       clearTimeout(this.followTimers.get(follower.profileId));
       // Debounce so a burst of single-page-app route changes produces one navigation.
       this.followTimers.set(follower.profileId, setTimeout(() => {
         this.followTimers.delete(follower.profileId);
+        // While tab counts differ, tab mirroring opens/closes/selects tabs; do not move the current tab.
+        const adminTabs = this.bridge.tabLayout?.(adminId), followerTabs = this.bridge.tabLayout?.(follower.profileId);
+        if (adminTabs && followerTabs && adminTabs.urls.length !== followerTabs.urls.length) return;
         void this.bridge.followNavigation?.(follower.profileId, page).catch(() => {});
       }, 400));
     }
@@ -238,10 +317,10 @@ export class StakeModeWorkspace {
   snapshot(): object {
     const statuses = new Map(this.relay.statuses().map(row => [row.profileId, row]));
     return { profiles: this.manager.list().map(p => { const metadata = this.library.get(p.id); const status = statuses.get(p.id); return { ...p, ...(status ?? { role: "manual", paused: false, connected: false, origin: "", queued: 0 }),
-      readiness: profileReadiness(p, status),
+      readiness: profileReadiness(p, status), dialogs: this.bridge?.pendingDialogs?.(p.id) ?? [],
       groupId: metadata.groupId, tags: metadata.tags, notes: metadata.notes, bookmarkCount: metadata.bookmarks.length,
       syncMechanism: p.engine === "firefox" ? "Playwright page binding" : "Manifest V3 extension" }; }), groups: this.library.listGroups(),
-      pacing: this.relay.pacing, origins: this.relay.origins, epoch: this.relay.epoch, autoFollow: this.relay.autoFollow, mainSite: MAIN_SITE_ORIGIN,
+      pacing: this.relay.pacing, origins: this.relay.origins, epoch: this.relay.epoch, autoFollow: this.relay.autoFollow, mainSite: MAIN_SITE_ORIGIN, ungroupedKey: UNGROUPED,
       limits: { maxVisible: MAX_VISIBLE_PROFILES, maxProfiles: 256, maxConcurrentLaunches: 4, screenshotFps: 2 },
       policy: { credentialsMirrored: false, financialActionsMirrored: false, actionsRequireHumanOperator: true } };
   }
@@ -344,7 +423,7 @@ export class StakeModeWorkspace {
     if (profileRoute) return this.profileRequest(request, profileRoute[1]!, profileRoute[2], url);
     if (request.method !== "POST") return json({ error: "Method not allowed" }, 405);
     try {
-      const body = await boundedJson(request);
+      const body = await boundedJson(request, url.pathname === "/workspace/api/files" ? 1048576 : undefined);
       const operation = url.pathname.slice("/workspace/api/".length);
       if (operation === "bulk") {
         const input = body as unknown as BulkProfileInput;
@@ -372,12 +451,13 @@ export class StakeModeWorkspace {
       if (operation === "follow") {
         // Fleet-wide follow controls: "pause" stops following, "resume" rejoins and unpauses everyone.
         if (body.action !== "pause" && body.action !== "resume") throw new Error("Follow action must be pause or resume");
-        const statuses = this.relay.statuses();
+        const group = this.groupParam(body.groupId);
+        const statuses = this.relay.statuses().filter(row => group === undefined || row.group === group);
         if (body.action === "pause") { for (const row of statuses) if (row.role === "follower" && !row.paused) this.relay.setPaused(row.profileId, true); }
         else {
           for (const row of statuses) if (row.paused && this.syncEligible(row.profileId)) this.relay.setPaused(row.profileId, false);
           this.relay.rejoinAll();
-          if (this.relay.autoFollow && statuses.some(row => row.role === "admin")) this.relay.forceFollowers(id => this.syncEligible(id));
+          if (this.relay.autoFollow) for (const admin of statuses.filter(row => row.role === "admin")) this.relay.forceFollowers(id => this.syncEligible(id), admin.group);
         }
         this.publishSnapshot();
         return json({ snapshot: this.snapshot() });
@@ -393,7 +473,7 @@ export class StakeModeWorkspace {
         return json({ saved, snapshot: this.snapshot() });
       }
       if (operation === "force-followers") {
-        const forced = this.relay.forceFollowers(id => this.syncEligible(id));
+        const forced = this.relay.forceFollowers(id => this.syncEligible(id), this.groupParam(body.groupId));
         this.publishSnapshot();
         return json({ forced, snapshot: this.snapshot() });
       }
@@ -424,7 +504,31 @@ export class StakeModeWorkspace {
         browsingUrl(body.url);
         await this.bridge.navigate(id, body.url);
       } else if (operation === "policy") this.manager.setPolicy(id, body as any);
-      else if (operation === "view") this.manager.setMobileView(id, body.mobileView ?? null);
+      else if (operation === "view") { if (body.windowMode !== undefined) this.manager.setWindowMode(id, body.windowMode); if (body.mobileView !== undefined || body.windowMode === undefined) this.manager.setMobileView(id, body.mobileView ?? null); }
+      else if (operation === "layout") {
+        if (!this.manager.getLaunch(id)) return json({ error: "Start this browser profile first" }, 409);
+        if (!this.canControl(id)) return json({ error: "Only the admin or a manual profile can be resized here" }, 403);
+        await this.bridge.applyLayout(id, validateLayout(body));
+      } else if (operation === "files") {
+        if (!this.canControl(id)) return json({ error: "Switch this profile to manual control first" }, 403);
+        if (!Array.isArray(body.files) || !body.files.length || body.files.length > 10) throw new Error("Choose 1 to 10 files");
+        let total = 0;
+        const files = body.files.map((file: Record<string, unknown>) => {
+          if (typeof file?.name !== "string" || typeof file.data !== "string" || file.name.length > 200 || (file.mimeType !== undefined && typeof file.mimeType !== "string")) throw new Error("File is invalid");
+          const buffer = Buffer.from(file.data, "base64"); total += buffer.length;
+          return { name: file.name.replace(/[\\/]/g, "_"), mimeType: String(file.mimeType || "application/octet-stream").slice(0, 100), buffer };
+        });
+        if (total > 700 * 1024) throw new Error("Uploads here are limited to 700 KB in total; switch this profile to a real window for larger files");
+        await this.bridge.provideFiles(id, files);
+      } else if (operation === "dialog") {
+        if (typeof body.dialogId !== "string" || typeof body.accept !== "boolean") throw new Error("Dialog answer is invalid");
+        if (body.text !== undefined && (typeof body.text !== "string" || body.text.length > 200)) throw new Error("Dialog text is too long");
+        if (!await this.bridge.answerDialog(id, body.dialogId, body.accept, body.text as string | undefined)) return json({ error: "That dialog is already closed" }, 409);
+      }
+      else if (operation === "focus") {
+        if (!this.manager.getLaunch(id)) return json({ error: "Start this browser profile first" }, 409);
+        await this.bridge.focusWindow(id);
+      }
       else return json({ error: "Route not found" }, 404);
       this.publishSnapshot();
       return json({ profile: this.manager.getProfile(id), snapshot: this.snapshot() });
@@ -471,7 +575,7 @@ export class StakeModeWorkspace {
         return json({ browser: await this.bridge.browserAction(id, command), snapshot: this.snapshot() });
       }
       if ((operation === undefined && request.method === "DELETE") || (operation === "delete" && request.method === "POST")) {
-        const body = await boundedJson(request);
+        const body = await boundedJson(request, url.pathname === "/workspace/api/files" ? 1048576 : undefined);
         if (body.confirmation !== id || Object.keys(body).some(key => key !== "confirmation")) return json({ error: "Type the exact profile ID to confirm deletion of its local browser data" }, 400);
         if (!this.manager.canEditProfile(id)) return json({ error: "Stop this profile and finish its lifecycle operation before deleting local data" }, 409);
         const result = await this.manager.deleteProfile(id);
@@ -481,7 +585,7 @@ export class StakeModeWorkspace {
       }
       if (operation === "network" && request.method === "POST") {
         if (!this.manager.canEditProfile(id)) return json({ error: "Stop this profile before changing its network route" }, 409);
-        const body = await boundedJson(request);
+        const body = await boundedJson(request, url.pathname === "/workspace/api/files" ? 1048576 : undefined);
         if (Object.keys(body).some(key => !["networkMode", "proxy"].includes(key))) throw new Error("Network request contains an unsupported field");
         const profile = this.manager.updateNetwork(id, body as any);
         this.relay.manual(id, "network_changed");
@@ -546,11 +650,12 @@ export class StakeModeWorkspace {
         const input = safeManualControl(packet);
         if (input.profileId !== socket.data.focused || !socket.data.subscribed.has(input.profileId)) throw new Error("Focus this browser tile before controlling it");
         await this.dispatchControl(socket, input);
-      } catch { this.send(socket, { type: "CONTROL_ERROR", profileId: packet.profileId, error: "Control requires a focused administrator or manual browser profile" }); }
+      } catch { if (packet.kind !== "move") this.send(socket, { type: "CONTROL_ERROR", profileId: packet.profileId, error: "Control requires a focused administrator or manual browser profile" }); }
     }
   }
   private dispatchControl(socket: ServerWebSocket<SocketState>, input: ManualControl): Promise<void> {
     const queue = this.controlQueues.get(input.profileId) ?? { count: 0, chain: Promise.resolve() };
+    if (input.kind === "move" && queue.count > 4) return Promise.resolve(); // pointer moves coalesce under load
     if (queue.count >= 32) return Promise.reject(new Error("Manual control queue exceeded its limit"));
     const enqueuedAt = Date.now();
     queue.count++; this.controlQueues.set(input.profileId, queue);
@@ -575,12 +680,29 @@ export class StakeModeWorkspace {
   private publishProfilePacket(profileId: string, packet: unknown): void {
     for (const socket of this.sockets) if (socket.data.client === "dashboard" && socket.data.subscribed.has(profileId)) this.send(socket, packet);
   }
+  /** Optional group scope from a request body: undefined = every group. */
+  private groupParam(value: unknown): string | undefined {
+    if (value === undefined || value === null || value === "") return undefined;
+    if (typeof value !== "string" || value.length > 80 || !/^[A-Za-z0-9_-]+$/.test(value)) throw new Error("Group is invalid");
+    return value;
+  }
+  /** Profiles that changed library group get re-checked: one administrator per group. */
+  private knownGroups = new Map<string, string>();
+  private syncGroups(): void {
+    if (!this.manager || !this.library) return;
+    for (const profile of this.manager.list()) {
+      const group = this.relay.groupOf(profile.id), before = this.knownGroups.get(profile.id);
+      this.knownGroups.set(profile.id, group);
+      if (before !== undefined && before !== group) { try { this.relay.regroup(profile.id); } catch { /* not registered yet */ } }
+    }
+  }
   private publishDashboard(packet: Record<string, unknown>): void {
     if (this.shutdown) return;
     for (const socket of this.sockets) if (socket.data.client === "dashboard") this.send(socket, packet);
   }
   private publishSnapshot(): void {
     if (this.snapshotTimer || this.shutdown) return;
+    this.syncGroups();
     this.snapshotTimer = setTimeout(() => {
       this.snapshotTimer = undefined;
       for (const socket of this.sockets) if (socket.data.client === "dashboard") this.send(socket, { type: "SNAPSHOT", snapshot: this.snapshot() });

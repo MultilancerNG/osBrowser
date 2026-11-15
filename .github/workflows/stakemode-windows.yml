@@ -192,7 +192,7 @@ jobs:
         env:
           STAKEMODE_SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
         run: |
-          $files = @(Get-ChildItem src-tauri/target/release/bundle/nsis -File -Filter 'GameBrowser_0.1.0-preview.4_x64-setup.exe')
+          $files = @(Get-ChildItem src-tauri/target/release/bundle/nsis -File -Filter 'GameBrowser_0.1.0-preview.5_x64-setup.exe')
           if ($files.Count -ne 1) { throw 'Expected one versioned installer for native GUI smoke.' }
           ./scripts/stakemode-installed-smoke.ps1 -InstallerPath $files[0].FullName
       - name: Preserve installed desktop evidence
@@ -221,17 +221,17 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force dist | Out-Null
-          $name = 'GameBrowser_0.1.0-preview.4_x64-setup.exe'
+          $name = 'GameBrowser_0.1.0-preview.5_x64-setup.exe'
           $files = @(Get-ChildItem src-tauri/target/release/bundle/nsis -File -Filter '*setup.exe')
           if ($files.Count -ne 1 -or $files[0].Name -cne $name) { throw 'Expected exactly one correctly branded NSIS installer.' }
           Copy-Item $files[0].FullName (Join-Path dist $name)
           $acceptance = Get-Content artifacts/STAKEMODE-ACCEPTANCE.json -Raw | ConvertFrom-Json
-          if ($acceptance.passed -ne $true -or $acceptance.installedDesktop.passed -ne $true -or $acceptance.version -cne '0.1.0-preview.4' -or $acceptance.source -cne '${{ needs.validate.outputs.source_sha }}') { throw 'Final native browser and installed desktop acceptance must match this exact source and pass.' }
+          if ($acceptance.passed -ne $true -or $acceptance.installedDesktop.passed -ne $true -or $acceptance.version -cne '0.1.0-preview.5' -or $acceptance.source -cne '${{ needs.validate.outputs.source_sha }}') { throw 'Final native browser and installed desktop acceptance must match this exact source and pass.' }
           Copy-Item artifacts/STAKEMODE-ACCEPTANCE.json dist/STAKEMODE-ACCEPTANCE.json
           Copy-Item src-tauri/generated/browser.json dist/BROWSER-PROVENANCE.json
           Copy-Item docs/STAKE-MODE.md dist/RELEASE-NOTES.md
           @(
-            'Product: GameBrowser 0.1.0-preview.4',
+            'Product: GameBrowser 0.1.0-preview.5',
             'Source commit: ${{ needs.validate.outputs.source_sha }}',
             'Branch: stakemode',
             'Upstream source: 3830cc4f8350b3b21e57dc962a182e7bdfdb3f05',
@@ -258,13 +258,13 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $repo.private -ne $true) { throw 'StakeMode preview must remain private.' }
           $head = gh api repos/solomongs/AliasMode-Game/commits/stakemode --jq .sha
           if ($LASTEXITCODE -ne 0 -or $head -cne '${{ needs.validate.outputs.source_sha }}') { throw 'Source was superseded; do not publish this installer.' }
-          $tag = 'stakemode-v0.1.0-preview.4'
+          $tag = 'stakemode-v0.1.0-preview.5'
           $existingTag = gh api "repos/solomongs/AliasMode-Game/git/ref/tags/$tag" 2>$null
           if ($LASTEXITCODE -eq 0) { throw 'StakeMode release tag already exists; never overwrite a previous release.' }
           $global:LASTEXITCODE = 0
           $assets = @(Get-ChildItem dist -File | ForEach-Object FullName)
           if ($assets.Count -ne 6) { throw 'Release asset count is invalid.' }
-          gh release create $tag @assets --target '${{ needs.validate.outputs.source_sha }}' --draft --prerelease --title 'GameBrowser 0.1.0-preview.4 — Windows browser workspace' --notes-file docs/STAKE-MODE.md
+          gh release create $tag @assets --target '${{ needs.validate.outputs.source_sha }}' --draft --prerelease --title 'GameBrowser 0.1.0-preview.5 — Windows browser workspace' --notes-file docs/STAKE-MODE.md
           if ($LASTEXITCODE -ne 0) { throw 'Release creation failed; build remains in workflow artifacts.' }
           $release = gh release view $tag --json targetCommitish,isDraft,isPrerelease,assets | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0 -or $release.targetCommitish -cne '${{ needs.validate.outputs.source_sha }}' -or $release.isDraft -ne $true -or $release.isPrerelease -ne $true -or $release.assets.Count -ne 6) { throw 'Draft release identity is invalid.' }

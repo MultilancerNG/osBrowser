@@ -1,6 +1,6 @@
 {
   "name": "gamebrowser",
-  "version": "0.1.0-preview.4",
+  "version": "0.1.0-preview.5",
   "description": "GameBrowser: local Windows browser profile manager with a consent-based synchronizer workspace",
   "module": "StakeMode-cli.ts",
   "type": "module",

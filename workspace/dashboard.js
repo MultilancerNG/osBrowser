@@ -15,7 +15,7 @@
   const proxyState = { entries: [], loading: false, editId: null, assignId: null, deleteId: null };
   const automationState = { workflows: [], templates: [], jobs: [], schedules: [], loading: false, timer: null, editId: null, runId: null, deleteId: null };
   let intersectionObserver;
-  Object.assign(state, { issueSince: new Map(), lostReasons: new Map(), quiet: new Map(), quietAll: 0, dropTimers: new Map(), liveGroup: "all" });
+  Object.assign(state, { syncGroup: null, issueSince: new Map(), lostReasons: new Map(), quiet: new Map(), quietAll: 0, dropTimers: new Map(), liveGroup: "all" });
 
   function text(element, value) { if (element && element.textContent !== String(value)) element.textContent = String(value); }
   function finite(value) { return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null; }
@@ -121,6 +121,9 @@
       if (packet.type === "SNAPSHOT" && packet.snapshot) { const authenticated = !state.connected; connection(true, "Relay connected"); applySnapshot(packet.snapshot); if (authenticated) refreshActiveView(); }
       else if (packet.type === "FRAME") drawFrame(packet);
       else if (packet.type === "SYNC_ACTION") { if (packet.action === "click") playClick(); const tile = state.tiles.get(String(packet.profileId || "")); if (tile) { tile.classList.remove("pulse"); void tile.offsetWidth; tile.classList.add("pulse"); } }
+      else if (packet.type === "DIALOG" || packet.type === "DIALOG_CLOSED") { if (packet.type === "DIALOG") playAlert(); api("snapshot").then(result => applySnapshot(result.snapshot || result)).catch(() => {}); }
+      else if (packet.type === "FILE_CHOOSER") { state.fileRequest = { profileId: String(packet.profileId || ""), multiple: packet.multiple === true }; const name = getProfile(state.fileRequest.profileId)?.name || state.fileRequest.profileId; if (state.browserProfileId === state.fileRequest.profileId) render(); else toast(`${name} wants a file. Open its Full view to choose one.`); }
+      else if (packet.type === "DOWNLOAD") { const name = getProfile(String(packet.profileId || ""))?.name || packet.profileId; if (packet.error) showError(`${name}: ${packet.name} could not be downloaded.`, "Check free disk space and that Downloads\GameBrowser is writable, then try again."); else toast(`${name}: saved ${packet.name} to ${packet.path}`); }
       else if (packet.type === "SYNC_LOST") { const id = String(packet.profileId || ""); if (id) state.lostReasons.set(id, String(packet.reason || "manual").slice(0, 160)); }
       else if (packet.type === "BROWSER_STATE" && packet.browser) applyBrowserState(packet.browser, false);
       else if (packet.type === "FRAME_ERROR") setFrameError(String(packet.profileId || ""), String(packet.error || "Live view unavailable"));
@@ -178,7 +181,7 @@
 
   function actions(id) {
     const wrap = document.createElement("div"); wrap.className = "row-actions";
-    for (const [action, label] of [["browser", "Full view"], ["settings", "Settings"], ["organize", "Organize"], ["copy", "Copy config"], ["delete", "Delete local"], ["start", "Start"], ["stop", "Stop"], ["pause", "Pause sync"], ["manual", "Manual"], ["kill", "Force kill"]]) { const button = document.createElement("button"); button.className = `button ${["kill", "delete"].includes(action) ? "danger" : "subtle"}${["organize", "copy"].includes(action) ? " library-row-action" : ""}`; button.dataset.action = action; button.dataset.profileId = id; button.textContent = label; wrap.append(button); }
+    for (const [action, label] of [["browser", "Full view"], ["focus", "Show window"], ["settings", "Settings"], ["organize", "Organize"], ["copy", "Copy config"], ["delete", "Delete local"], ["start", "Start"], ["stop", "Stop"], ["pause", "Pause sync"], ["manual", "Manual"], ["kill", "Force kill"]]) { const button = document.createElement("button"); button.className = `button ${["kill", "delete"].includes(action) ? "danger" : "subtle"}${["organize", "copy"].includes(action) ? " library-row-action" : ""}`; button.dataset.action = action; button.dataset.profileId = id; button.textContent = label; wrap.append(button); }
     return wrap;
   }
 
@@ -193,9 +196,46 @@
     tile._frameSequence = -1; tile._frameAt = null; tile._frameHealthy = false; tile._streamGeneration = 0; tile._visible = false;
     canvas.addEventListener("focus", () => focusProfile(id));
     canvas.addEventListener("blur", () => { if (state.focusedProfile === id) { state.focusedProfile = null; send({ type: "FOCUS", profileId: null }); } });
-    canvas.addEventListener("click", event => { const current = getProfile(id); if (!current || !allowedControl(current) || !canvas.width || !canvas.height) return; canvas.focus(); focusProfile(id); const bounds = canvas.getBoundingClientRect(); const scale = Math.min(bounds.width / canvas.width, bounds.height / canvas.height); if (!scale) return; const left = bounds.left + (bounds.width - canvas.width * scale) / 2, top = bounds.top + (bounds.height - canvas.height * scale) / 2; const x = Math.floor((event.clientX - left) / scale), y = Math.floor((event.clientY - top) / scale); if (x < 0 || y < 0 || x >= canvas.width || y >= canvas.height) return; control(id, { kind: "click", x, y }); });
-    canvas.addEventListener("wheel", event => { const current = getProfile(id); if (!current || !allowedControl(current)) return; event.preventDefault(); canvas.focus({ preventScroll: true }); focusProfile(id); const factor = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? canvas.height : 1; control(id, { kind: "scroll", deltaX: Math.max(-2000, Math.min(2000, Math.round(event.deltaX * factor))), deltaY: Math.max(-2000, Math.min(2000, Math.round(event.deltaY * factor))) }); }, { passive: false });
-    canvas.addEventListener("keydown", event => { const current = getProfile(id); if (!current || !allowedControl(current) || event.isComposing) return; if (event.ctrlKey || event.metaKey || event.altKey) return; const key = event.key; if (key.length === 1) { event.preventDefault(); control(id, { kind: "text", text: key }); } else if (["Backspace", "Delete", "Tab", "Enter", "Escape", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"].includes(key)) { if (key === "Tab" && event.shiftKey) return; event.preventDefault(); control(id, { kind: "key", key }); } });
+    // Browser-like pointer input: click, double-click, right-click, drag/select and hover.
+    const toPoint = event => { if (!canvas.width || !canvas.height) return null; const bounds = canvas.getBoundingClientRect(); const scale = Math.min(bounds.width / canvas.width, bounds.height / canvas.height); if (!scale) return null; const left = bounds.left + (bounds.width - canvas.width * scale) / 2, top = bounds.top + (bounds.height - canvas.height * scale) / 2; const x = Math.floor((event.clientX - left) / scale), y = Math.floor((event.clientY - top) / scale); return x < 0 || y < 0 || x >= canvas.width || y >= canvas.height ? null : { x, y }; };
+    const can = () => { const current = getProfile(id); return !!current && allowedControl(current); };
+    let press = null, lastClick = { at: 0, x: -99, y: -99 }, lastMove = 0;
+    canvas.addEventListener("pointerdown", event => { if (!can() || event.button === 1) return; const point = toPoint(event); if (!point) return; canvas.focus(); focusProfile(id); press = { ...point, button: event.button === 2 ? "right" : "left", dragging: false }; try { canvas.setPointerCapture(event.pointerId); } catch {} });
+    canvas.addEventListener("pointermove", event => {
+      if (!can()) return; const point = toPoint(event); if (!point) return;
+      if (press && !press.dragging && press.button === "left" && Math.hypot(point.x - press.x, point.y - press.y) > 4) { press.dragging = true; control(id, { kind: "down", x: press.x, y: press.y, button: "left" }); }
+      if (Date.now() - lastMove < (press?.dragging ? 30 : 60)) return; lastMove = Date.now();
+      control(id, { kind: "move", ...point });
+    });
+    canvas.addEventListener("pointerup", event => {
+      if (!press) return; const start = press; press = null; try { canvas.releasePointerCapture(event.pointerId); } catch {}
+      if (!can()) return; const point = toPoint(event) || start;
+      if (start.dragging) { control(id, { kind: "up", ...point, button: "left" }); return; }
+      if (start.button === "right") return; // handled by contextmenu
+      const double = Date.now() - lastClick.at < 380 && Math.hypot(point.x - lastClick.x, point.y - lastClick.y) < 6;
+      lastClick = double ? { at: 0, x: -99, y: -99 } : { at: Date.now(), ...point };
+      control(id, { kind: double ? "dblclick" : "click", ...point });
+    });
+    canvas.addEventListener("contextmenu", event => { if (!can()) return; event.preventDefault(); const point = toPoint(event); if (point) control(id, { kind: "contextmenu", ...point }); });
+    canvas.addEventListener("wheel", event => {
+      const current = getProfile(id); if (!current || !allowedControl(current)) return; event.preventDefault(); canvas.focus({ preventScroll: true }); focusProfile(id);
+      if (event.ctrlKey || event.metaKey) { const zoom = Math.max(0.25, Math.min(3, Math.round(((state.zoom?.get(id) ?? 1) + (event.deltaY < 0 ? 0.1 : -0.1)) * 100) / 100)); (state.zoom ??= new Map()).set(id, zoom); control(id, { kind: "zoom", scale: zoom }); if (state.browserProfileId === id) text($("#browser-zoom-value"), `${Math.round(zoom * 100)}%`); return; }
+      const factor = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? canvas.height : 1; control(id, { kind: "scroll", deltaX: Math.max(-2000, Math.min(2000, Math.round(event.deltaX * factor))), deltaY: Math.max(-2000, Math.min(2000, Math.round(event.deltaY * factor))) });
+    }, { passive: false });
+    canvas.addEventListener("keydown", event => {
+      const current = getProfile(id); if (!current || !allowedControl(current) || event.isComposing) return;
+      const key = event.key, named = ["Backspace", "Delete", "Tab", "Enter", "Escape", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown", "Insert", "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12"];
+      const modifiers = [event.ctrlKey && "Control", event.shiftKey && "Shift", event.altKey && "Alt", event.metaKey && "Meta"].filter(Boolean);
+      const shortcut = event.ctrlKey || event.metaKey || event.altKey;
+      if (shortcut) {
+        if ((event.ctrlKey || event.metaKey) && key.toLowerCase() === "v") return; // paste handler sends the text
+        const base = key === " " ? "Space" : key.length === 1 ? key.toLowerCase() : key;
+        if (!/^(?:[a-z0-9]|[=+\-])$/.test(base) && !named.includes(base)) return;
+        event.preventDefault(); control(id, { kind: "key", key: base, modifiers }); return;
+      }
+      if (key.length === 1) { event.preventDefault(); control(id, { kind: "text", text: key }); }
+      else if (named.includes(key)) { if (key === "Tab" && event.shiftKey) return; event.preventDefault(); control(id, event.shiftKey && key !== "Tab" ? { kind: "key", key, modifiers: ["Shift"] } : { kind: "key", key }); }
+    });
     canvas.addEventListener("paste", event => { const current = getProfile(id); if (!current || !allowedControl(current)) return; const value = event.clipboardData?.getData("text/plain") || ""; if (value && value.length <= 2048) { event.preventDefault(); control(id, { kind: "text", text: value }); } else if (value) { event.preventDefault(); toast("Paste is limited to 2,048 characters."); } });
     intersectionObserver?.observe(tile);
     return tile;
@@ -206,7 +246,7 @@
 
   function updateButtons(root, profile) {
     const running = isRunning(profile), busy = state.busy.has(profileId(profile)), pending = ["starting", "stopping"].includes(profile.status);
-    $$("[data-action]", root).forEach(button => { const action = button.dataset.action; button.hidden = ["browser", "settings", "organize", "copy"].includes(action) ? false : action === "delete" ? !profileStopped(profile) : action === "start" ? running || pending : action === "stop" || action === "kill" ? !running && !pending : !running; button.disabled = busy || !state.token || (pending && !["kill", "browser", "settings", "organize"].includes(action)); if (action === "pause") text(button, profile.paused ? "Resume" : "Pause"); if (action === "manual") { text(button, profileRole(profile) === "manual" ? "Sync" : "Manual"); button.setAttribute("aria-pressed", String(profileRole(profile) === "manual")); } });
+    $$("[data-action]", root).forEach(button => { const action = button.dataset.action; button.hidden = action === "focus" ? !(running && profile.windowMode === "native") : ["browser", "settings", "organize", "copy"].includes(action) ? false : action === "delete" ? !profileStopped(profile) : action === "start" ? running || pending : action === "stop" || action === "kill" ? !running && !pending : !running; button.disabled = busy || !state.token || (pending && !["kill", "browser", "settings", "organize"].includes(action)); if (action === "pause") text(button, profile.paused ? "Resume" : "Pause"); if (action === "manual") { text(button, profileRole(profile) === "manual" ? "Sync" : "Manual"); button.setAttribute("aria-pressed", String(profileRole(profile) === "manual")); } });
     const select = $("[data-role-for]", root); if (select) { select.disabled = busy || pending || !state.token; if (document.activeElement !== select) select.value = profileRole(profile); select.setAttribute("aria-label", `${profile.name || profileId(profile)} synchronization role`); }
   }
 
@@ -219,7 +259,7 @@
     $$("[data-tile-nav]", tile).forEach(button => { button.disabled = !allowedControl(profile); button.title = allowedControl(profile) ? button.getAttribute("aria-label") : "Followers mirror the admin. Press Manual to browse this profile yourself."; });
     const issue = profileIssue(profile), advice = $(".tile-advice", tile); advice.hidden = !issue; if (issue) { text($(".tile-advice-title", tile), issue.title); text($(".tile-advice-text", tile), issue.advice); }
     text($(".tile-name", tile), profile.name || id); $(".tile-name", tile).title = profile.name || id;
-    text($(".tile-engine", tile), `${engineLabel(profile)}${profile.mobileView ? ` · mobile ${profile.mobileView.width}×${profile.mobileView.height}` : ""}`);
+    text($(".tile-engine", tile), `${engineLabel(profile)} · ${groupName(groupKey(profile))}${profile.windowMode === "native" ? " · native window" : ""}${profile.mobileView ? ` · mobile ${profile.mobileView.width}×${profile.mobileView.height}` : ""}`);
     const badge = $(".tile-badge", tile); badge.className = `badge tile-badge ${currentState}`; text(badge, stateLabel(profile));
     text($(".tile-url", tile), urlLabel(profile)); $(".tile-url", tile).title = urlLabel(profile);
     text($(".tile-cpu", tile), reading.cpu === null ? "—" : `${number(reading.cpu, 1)}%`);
@@ -439,7 +479,7 @@
 
   async function openProfileBrowser(id) {
     const profile = getProfile(id); if (!profile) return;
-    state.browserProfileId = id; setView("browser"); browserError("");
+    state.browserProfileId = id; state.syncGroup = groupKey(profile); $("#admin-select")._signature = ""; setView("browser"); browserError("");
     await loadBrowserState(id);
   }
 
@@ -453,9 +493,24 @@
     text($("#browser-profile-name"), profile.name || id);
     const browserRole = isRunning(profile) ? profileRole(profile) : "stopped"; $("#browser-role-pill").dataset.role = browserRole; text($("#browser-role-pill"), { admin: "Admin", follower: "Follower", manual: "Manual", stopped: "Stopped" }[browserRole]);
     text($("#browser-view-title"), browserRole === "admin" ? "Full Admin View" : "Full view"); $("#browser-workspace").dataset.role = browserRole;
-    const followers = state.snapshot.profiles.filter(other => profileId(other) !== id && isRunning(other) && profileRole(other) === "follower"), connected = followers.filter(isFollowing).length;
+    const followers = state.snapshot.profiles.filter(other => profileId(other) !== id && isRunning(other) && profileRole(other) === "follower" && groupKey(other) === groupKey(profile)), connected = followers.filter(isFollowing).length;
     text($("#browser-follow-status"), browserRole === "admin" ? `Admin · ${connected} follower${connected === 1 ? "" : "s"} connected` : browserRole === "follower" ? "Follower · mirrors the admin" : browserRole === "manual" ? "Manual · not synchronized" : "");
     renderFollowerChips(followers);
+    $("#browser-show-window").hidden = !(isRunning(profile) && profile.windowMode === "native");
+    const dialogInfo = Array.isArray(profile.dialogs) ? profile.dialogs[0] : null, panel = $("#browser-dialog");
+    panel.hidden = !dialogInfo;
+    if (dialogInfo && panel.dataset.dialogId !== dialogInfo.id) {
+      panel.dataset.dialogId = dialogInfo.id;
+      text($("#browser-dialog-type"), dialogInfo.type === "confirm" ? "The page asks you to confirm" : dialogInfo.type === "prompt" ? "The page asks for an answer" : "Message from the page");
+      text($("#browser-dialog-message"), dialogInfo.message || "(no message)");
+      const input = $("#browser-dialog-text"); input.hidden = dialogInfo.type !== "prompt"; input.value = dialogInfo.defaultValue || "";
+      $("#browser-dialog-cancel").hidden = dialogInfo.type === "alert";
+    }
+    const filePanel = $("#browser-file"), wantsFile = state.fileRequest?.profileId === id; filePanel.hidden = !wantsFile; if (wantsFile) $("#browser-file-input").multiple = !!state.fileRequest.multiple;
+    const sizeAllowed = isRunning(profile) && profileRole(profile) !== "follower" && !profile.mobileView;
+    for (const selector of ["#browser-size", "#browser-size-w", "#browser-size-h", "#browser-size-apply"]) $(selector).disabled = !sizeAllowed;
+    text($("#browser-size-note"), profile.mobileView ? "Phone-view profiles keep their device size." : profileRole(profile) === "follower" ? "Followers take the admin's size automatically." : profile.windowMode === "native" ? "Resizes the real window; followers in this group copy it." : "Followers in this group copy the admin's size.");
+    if (document.activeElement !== $("#browser-size-w") && document.activeElement !== $("#browser-size-h") && !$("#browser-size-w").value) { $("#browser-size-w").value = profile.screenWidth || 1280; $("#browser-size-h").value = profile.screenHeight || 720; }
     text($("#browser-profile-meta"), `${engineLabel(profile)} · ${profileRole(profile)} · ${profile.networkSummary || "Network: " + (profile.networkMode || "direct")}`);
     const tabs = $("#browser-tabs");
     const signature = JSON.stringify([browser?.activeTabId, browser?.tabs.map(tab => [tab.id, tab.title, tab.url, tab.loading]), busy, controlling]);
@@ -542,7 +597,7 @@
     text($("#screen-stored"), Number.isSafeInteger(profile.screenWidth) && Number.isSafeInteger(profile.screenHeight) ? `Stored desktop viewport: ${profile.screenWidth.toLocaleString()} × ${profile.screenHeight.toLocaleString()} px` : "Stored desktop viewport is unavailable.");
     $("#profile-delete-button").disabled = !stopped || state.busy.has(profileId(profile));
     const chromium = (profile.engine || "chromium") === "chromium";
-    $("#view-settings-fields").disabled = !stopped || !chromium || state.busy.has(profileId(profile)); $("#view-save").disabled = !stopped || !chromium || state.busy.has(profileId(profile));
+    $("#view-settings-fields").disabled = !stopped || state.busy.has(profileId(profile)); $("#view-save").disabled = !stopped || state.busy.has(profileId(profile)); { const viewForm = $("#profile-view-form"); for (const name of ["viewPreset", "width", "height"]) if (viewForm.elements[name]) viewForm.elements[name].disabled = !chromium; }
     text($("#view-stored"), !chromium ? "Mobile view is available for Chromium profiles only." : profile.mobileView ? `Current view: mobile ${profile.mobileView.width} × ${profile.mobileView.height} px with touch${stopped ? "" : " · stop the profile to change it"}` : `Current view: desktop${stopped ? "" : " · stop the profile to change it"}`);
     const cookieAllowed = isRunning(profile) && profileRole(profile) !== "follower";
     for (const selector of ["#cookie-export", "#cookie-show-import"]) $(selector).disabled = !cookieAllowed;
@@ -570,6 +625,7 @@
     screenForm.elements.width.value = profile.screenWidth ?? ""; screenForm.elements.height.value = profile.screenHeight ?? "";
     screenForm.elements.screenPreset.value = [...screenForm.elements.screenPreset.options].some(option => option.value === screenPreset) ? screenPreset : "custom"; text($("#screen-error"), "");
     const viewForm = $("#profile-view-form"), viewPreset = profile.mobileView ? `${profile.mobileView.width}x${profile.mobileView.height}` : "desktop";
+    viewForm.elements.windowMode.value = profile.windowMode === "native" ? "native" : "dashboard";
     viewForm.elements.viewPreset.value = [...viewForm.elements.viewPreset.options].some(option => option.value === viewPreset) ? viewPreset : "custom";
     viewForm.elements.width.value = profile.mobileView?.width ?? 393; viewForm.elements.height.value = profile.mobileView?.height ?? 852; text($("#view-error"), "");
     text($("#profile-settings-title"), profile.name || id); text($("#profile-settings-identity"), `${engineLabel(profile)} · ${id}`); text($("#network-error"), "");
@@ -836,6 +892,7 @@
     const id = button.dataset.profileId, profile = getProfile(id); if (!profile) return;
     const action = button.dataset.action;
     if (action === "browser") { await openProfileBrowser(id); return; }
+    if (action === "focus") { try { await api("focus", { profileId: id }); toast(`${profile.name || id}: window brought to the front.`); } catch (error) { showError(error); } return; }
     if (action === "settings") { await openProfileSettings(id); return; }
     if (action === "organize") { await openMetadata(id); return; }
     if (action === "copy") { openProfileCopy(id); return; }
@@ -1006,7 +1063,7 @@
       const networkMode = form.elements.networkMode.value;
       const proxies = networkMode === "proxy" ? form.elements.proxies.value.split(/\r?\n/).map(value => value.trim()).filter(Boolean) : []; if (networkMode === "proxy" && proxies.length !== count && proxies.length !== 1) throw new Error("Supply one shared proxy endpoint or exactly one endpoint per profile.");
       const resolutions = [...form.elements.resolution.selectedOptions].map(option => { const [width, height] = option.value === "custom" ? [form.elements.screenWidth.value, form.elements.screenHeight.value] : option.value.split("x"); return desktopScreen(width, height); }); if (!resolutions.length) throw new Error("Choose at least one desktop viewport preset or Custom desktop size.");
-      const result = await api("bulk", { count, prefix: form.elements.prefix.value.trim(), engine: form.elements.engine.value, origin, networkMode, proxies, ...(form.elements.ramMb.value === "auto" && form.elements.heapMb.value === "auto" ? { autoResources: true } : { autoResources: false, ramMb: form.elements.ramMb.value === "auto" ? 2048 : Number(form.elements.ramMb.value), heapMb: form.elements.heapMb.value === "auto" ? 512 : Number(form.elements.heapMb.value) }), resolutions, headless: true, ...(form.elements.viewMode.value !== "desktop" ? { mobileView: { width: Number(form.elements.viewMode.value.split("x")[0]), height: Number(form.elements.viewMode.value.split("x")[1]) } } : {}) });
+      const result = await api("bulk", { count, prefix: form.elements.prefix.value.trim(), engine: form.elements.engine.value, origin, networkMode, proxies, ...(form.elements.ramMb.value === "auto" && form.elements.heapMb.value === "auto" ? { autoResources: true } : { autoResources: false, ramMb: form.elements.ramMb.value === "auto" ? 2048 : Number(form.elements.ramMb.value), heapMb: form.elements.heapMb.value === "auto" ? 512 : Number(form.elements.heapMb.value) }), resolutions, headless: true, ...(form.elements.viewMode.value !== "desktop" ? { mobileView: { width: Number(form.elements.viewMode.value.split("x")[0]), height: Number(form.elements.viewMode.value.split("x")[1]) } } : {}), ...(form.elements.windowMode.value === "native" ? { windowMode: "native" } : {}) });
       form.elements.proxies.value = "";
       if (!result.snapshot) { const fresh = await api("snapshot"); applySnapshot(fresh.snapshot || fresh); }
       $("#create-dialog").close(); toast(`${count} isolated profile${count === 1 ? "" : "s"} created.`);
@@ -1029,7 +1086,8 @@
       const mobileView = desktop ? null : { width: Number(form.elements.width.value), height: Number(form.elements.height.value) };
       if (mobileView && (!Number.isInteger(mobileView.width) || !Number.isInteger(mobileView.height) || mobileView.width < 320 || mobileView.width > 1024 || mobileView.height < 480 || mobileView.height > 2160)) throw new Error("Mobile view needs width 320–1024 and height 480–2160 px.");
       state.busy.add(id); updateProfileSettingsAvailability(); text($("#view-save"), "Saving…");
-      await api("view", { profileId: id, mobileView }); toast(desktop ? "Desktop view saved for the next start." : "Mobile view saved for the next start.");
+      const windowMode = form.elements.windowMode.value === "native" ? "native" : "dashboard";
+      await api("view", { profileId: id, windowMode, ...(profile.engine === "firefox" ? {} : { mobileView }) }); toast(`${windowMode === "native" ? "Real browser window" : "Dashboard view"}${profile.engine === "firefox" ? "" : desktop ? ", desktop size" : ", mobile size"} saved for the next start.`);
     } catch (error) { text($("#view-error"), errorMessage(error)); }
     finally { state.busy.delete(id); text($("#view-save"), "Save view mode"); updateProfileSettingsAvailability(); render(); }
   });
@@ -1062,7 +1120,7 @@
   $("#select-all-button").addEventListener("click", () => { for (const profile of state.snapshot.profiles) libraryState.selected.add(profileId(profile)); render(); updateLibrarySelection(); });
   $("#force-followers-button").addEventListener("click", async () => {
     const button = $("#force-followers-button"); button.disabled = true;
-    try { const result = await api("force-followers", {}); toast(`${(result.forced || []).length} profile${(result.forced || []).length === 1 ? "" : "s"} now follow the admin.`); }
+    try { const result = await api("force-followers", groupBody()); toast(`${(result.forced || []).length} profile${(result.forced || []).length === 1 ? "" : "s"} now follow the admin.`); }
     catch (error) { showError(errorMessage(error)); }
     finally { button.disabled = false; }
   });
@@ -1145,6 +1203,8 @@
   };
   function profileIssue(profile) {
     const id = profileId(profile);
+    const waiting = Array.isArray(profile.dialogs) ? profile.dialogs[0] : null;
+    if (waiting) return { title: `${waiting.type === "confirm" ? "Confirm" : waiting.type === "prompt" ? "Prompt" : "Alert"} waiting: ${String(waiting.message).slice(0, 90)}`, advice: "Open Full view to answer it, or answer it in the admin so followers copy the answer." };
     if (profile.error) return { title: String(profile.error).slice(0, 140), advice: advise(profile.error) };
     const value = readiness(profile); if (value.level === "ready") { state.issueSince.delete(id); return null; }
     if (!isRunning(profile) && !["starting"].includes(profile.status)) { state.issueSince.delete(id); return null; }
@@ -1156,6 +1216,16 @@
     if (profileRole(profile) === "manual" && lost && value.label !== "Over memory budget") return { title: `Switched to manual: ${lost.replace(/_/g, " ")}`, advice: advise(lost) };
     const advice = READINESS_ADVICE[value.label]; return advice ? { title: value.label, advice } : null;
   }
+  function ungroupedKey() { return state.snapshot.ungroupedKey || "__ungrouped"; }
+  function groupKey(profile) { return profile?.group || profile?.groupId || ungroupedKey(); }
+  function groupName(key) { if (!key || key === ungroupedKey()) return "Ungrouped"; return (state.snapshot.groups || []).find(group => group.id === key)?.name || "Group"; }
+  function currentGroup() {
+    const keys = new Set(state.snapshot.profiles.map(groupKey));
+    if (state.syncGroup && (keys.has(state.syncGroup) || (state.snapshot.groups || []).some(group => group.id === state.syncGroup))) return state.syncGroup;
+    const admin = state.snapshot.profiles.find(profile => isRunning(profile) && profileRole(profile) === "admin");
+    return admin ? groupKey(admin) : state.snapshot.profiles[0] ? groupKey(state.snapshot.profiles[0]) : ungroupedKey();
+  }
+  function groupBody(extra = {}) { const key = currentGroup(); return key === ungroupedKey() ? { ...extra, groupId: key } : { ...extra, groupId: key }; }
   function isFollowing(profile) { return !!profile && isRunning(profile) && profileRole(profile) === "follower" && !profile.paused && profile.connected !== false && !profile.rejoining; }
   function quietFor(ms, id) { const until = Date.now() + ms; if (id) state.quiet.set(id, until); else state.quietAll = Math.max(state.quietAll, until); }
   function isQuiet(id) { return Date.now() < state.quietAll || Date.now() < (state.quiet.get(id) || 0); }
@@ -1183,8 +1253,16 @@
   }
 
   function renderFollowingBar() {
-    const select = $("#admin-select"), running = state.snapshot.profiles.filter(isRunning), admin = state.snapshot.profiles.find(profile => isRunning(profile) && profileRole(profile) === "admin");
-    const signature = JSON.stringify([running.map(profile => [profileId(profile), profile.name]), admin && profileId(admin)]);
+    const group = currentGroup(), groupSelect = $("#group-select");
+    const groupKeys = [...new Set([ungroupedKey(), ...(state.snapshot.groups || []).map(item => item.id), ...state.snapshot.profiles.map(groupKey)])];
+    const syncGroupSignature = JSON.stringify([groupKeys, (state.snapshot.groups || []).map(item => item.name), group]);
+    if (groupSelect._signature !== syncGroupSignature && document.activeElement !== groupSelect) {
+      groupSelect._signature = syncGroupSignature; groupSelect.replaceChildren();
+      for (const key of groupKeys) { const count = state.snapshot.profiles.filter(profile => groupKey(profile) === key && isRunning(profile)).length; const option = makeElement("option", "", `${groupName(key)} (${count} running)`); option.value = key; groupSelect.append(option); }
+      groupSelect.value = group;
+    }
+    const select = $("#admin-select"), running = state.snapshot.profiles.filter(profile => isRunning(profile) && groupKey(profile) === group), admin = running.find(profile => profileRole(profile) === "admin");
+    const signature = JSON.stringify([group, running.map(profile => [profileId(profile), profile.name]), admin && profileId(admin)]);
     if (select._signature !== signature && document.activeElement !== select) {
       select._signature = signature; select.replaceChildren(makeElement("option", "", running.length ? "Choose admin…" : "Start a profile first"));
       select.firstChild.value = "";
@@ -1199,6 +1277,7 @@
       filter.value = [...filter.options].some(option => option.value === current) ? current : "all"; state.liveGroup = filter.value;
     }
     const followers = running.filter(profile => profileRole(profile) === "follower");
+    document.body.dataset.syncGroup = group;
     $("#stop-following-button").disabled = !followers.some(profile => !profile.paused);
     $("#force-followers-button").disabled = !admin; $("#save-session-button").disabled = !running.length; $("#reload-all-button").disabled = !running.length;
     let selection = $("#live-selection"); if (!selection) { selection = makeElement("span", "live-selection"); selection.id = "live-selection"; selection.innerHTML = '<b></b><button type="button" class="text-button" id="live-bulk">Bulk actions</button><button type="button" class="text-button" id="live-clear">Clear</button>'; $("#full-admin-view").before(selection); $("#live-bulk").addEventListener("click", () => setView("profiles")); $("#live-clear").addEventListener("click", () => { libraryState.selected.clear(); render(); }); }
@@ -1223,10 +1302,50 @@
   }
   setSound(sound.enabled);
   $("#sound-toggle").addEventListener("click", () => { setSound(!sound.enabled); if (sound.enabled) playClick(); toast(sound.enabled ? "Sounds on: a tick for every admin click, an alert when a follower disconnects." : "Sounds off."); });
+  async function answerBrowserDialog(accept) {
+    const id = state.browserProfileId, panel = $("#browser-dialog"), dialogId = panel.dataset.dialogId; if (!id || !dialogId) return;
+    try { await api("dialog", { profileId: id, dialogId, accept, ...(accept && !$("#browser-dialog-text").hidden ? { text: $("#browser-dialog-text").value } : {}) }); panel.hidden = true; panel.dataset.dialogId = ""; }
+    catch (error) { showError(error); }
+  }
+  $("#browser-file-cancel").addEventListener("click", () => { state.fileRequest = null; render(); });
+  $("#browser-file-input").addEventListener("change", async event => {
+    const id = state.fileRequest?.profileId, chosen = [...event.target.files]; event.target.value = ""; if (!id || !chosen.length) return;
+    const total = chosen.reduce((sum, file) => sum + file.size, 0);
+    if (total > 700 * 1024) { showError(`Those files are ${Math.round(total / 1024)} KB; the limit here is 700 KB.`, "Switch this profile to a real browser window (Profile settings, Window mode) to upload large files with the native picker."); return; }
+    try {
+      const files = await Promise.all(chosen.slice(0, 10).map(file => new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve({ name: file.name, mimeType: file.type || "application/octet-stream", data: String(reader.result).split(",")[1] || "" }); reader.onerror = () => reject(new Error("The file could not be read")); reader.readAsDataURL(file); })));
+      await api("files", { profileId: id, files }); state.fileRequest = null; render(); toast(`Sent ${files.length} file${files.length === 1 ? "" : "s"} to the page.`);
+    } catch (error) { showError(error); }
+  });
+  $("#browser-dialog-ok").addEventListener("click", () => answerBrowserDialog(true));
+  $("#browser-dialog-cancel").addEventListener("click", () => answerBrowserDialog(false));
+  $("#browser-size").addEventListener("change", event => {
+    const value = event.target.value; if (!value) return;
+    if (value === "fit") { const stage = $("#browser-stage").getBoundingClientRect(); $("#browser-size-w").value = Math.max(200, Math.round(stage.width)); $("#browser-size-h").value = Math.max(150, Math.round(Math.max(stage.height, window.innerHeight - stage.top - 90))); }
+    else { const [w, h] = value.split("x"); $("#browser-size-w").value = w; $("#browser-size-h").value = h; }
+    $("#browser-size-apply").click();
+  });
+  $("#browser-size-apply").addEventListener("click", async () => {
+    const id = state.browserProfileId, width = Number($("#browser-size-w").value), height = Number($("#browser-size-h").value); if (!id) return;
+    if (!Number.isInteger(width) || !Number.isInteger(height) || width < 200 || width > 7680 || height < 150 || height > 4320) { showError("Viewport size must be 200–7680 × 150–4320 pixels."); return; }
+    try { await api("layout", { profileId: id, width, height }); toast(`Resized to ${width} × ${height}. Followers in this group follow.`); } catch (error) { showError(error); }
+  });
+  function zoomBrowser(delta, reset = false) {
+    const id = state.browserProfileId; if (!id) return; state.zoom ??= new Map();
+    const zoom = reset ? 1 : Math.max(0.25, Math.min(3, Math.round(((state.zoom.get(id) ?? 1) + delta) * 100) / 100));
+    state.zoom.set(id, zoom); text($("#browser-zoom-value"), `${Math.round(zoom * 100)}%`);
+    if (!control(id, { kind: "zoom", scale: zoom })) toast("Click inside the live page first, then zoom.");
+  }
+  $("#browser-zoom-in").addEventListener("click", () => zoomBrowser(0.1));
+  $("#browser-zoom-out").addEventListener("click", () => zoomBrowser(-0.1));
+  $("#browser-zoom-reset").addEventListener("click", () => zoomBrowser(0, true));
+  $("#browser-find").addEventListener("keydown", event => { if (event.key !== "Enter") return; event.preventDefault(); const id = state.browserProfileId, value = event.target.value.trim(); if (!id || !value) return; if (!control(id, { kind: "find", text: value })) toast("Click inside the live page first, then search."); });
+  $("#browser-show-window").addEventListener("click", async () => { const id = state.browserProfileId; if (!id) return; try { await api("focus", { profileId: id }); } catch (error) { showError(error); } });
+  $("#group-select").addEventListener("change", event => { state.syncGroup = event.target.value || null; $("#admin-select")._signature = ""; render(); });
   $("#admin-select").addEventListener("change", event => { const id = event.target.value; if (!id) return; quietFor(8000); mutateProfile(id, "role", { role: "admin" }); });
   $("#save-session-button").addEventListener("click", event => fleet(event.currentTarget, "save-session", {}, "Saving…", result => toast(result.saved ? `Saved ${result.saved} page${result.saved === 1 ? "" : "s"}. Each profile reopens there next time it starts.` : "Nothing to save yet: no running profile is on a stake.com page.")));
-  $("#resume-following-button").addEventListener("click", event => { quietFor(6000); fleet(event.currentTarget, "follow", { action: "resume" }, "Resuming…", () => toast("Followers resumed and rejoining the admin.")); });
-  $("#stop-following-button").addEventListener("click", event => { quietFor(6000); fleet(event.currentTarget, "follow", { action: "pause" }, "Stopping…", () => toast("Following stopped. Followers stay put until you press Resume.")); });
+  $("#resume-following-button").addEventListener("click", event => { quietFor(6000); fleet(event.currentTarget, "follow", groupBody({ action: "resume" }), "Resuming…", () => toast("Followers resumed and rejoining the admin.")); });
+  $("#stop-following-button").addEventListener("click", event => { quietFor(6000); fleet(event.currentTarget, "follow", groupBody({ action: "pause" }), "Stopping…", () => toast("Following stopped. Followers stay put until you press Resume.")); });
   $("#reload-all-button").addEventListener("click", event => { quietFor(25000); fleet(event.currentTarget, "reload-all", {}, "Reloading…", result => {
     const results = result.results || [], failed = results.filter(item => !item.ok);
     if (!results.length) toast("No running profile to reload.");

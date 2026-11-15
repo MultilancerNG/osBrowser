@@ -28,6 +28,8 @@ export interface BulkProfileInput {
   heapMb?: number;
   /** Default true when ramMb/heapMb are not given: budgets follow the machine. */
   autoResources?: boolean;
+  /** "native" = real visible browser window; default hidden (dashboard view). */
+  windowMode?: "native" | "dashboard";
   resolutions?: Array<string | { width: number; height: number }>;
   /** Optional phone viewport applied to every new Chromium profile. */
   mobileView?: { width: number; height: number } | null;
@@ -41,6 +43,8 @@ export interface WorkspaceProfileView {
   screenWidth: number; screenHeight: number;
   /** Present when the live page is emulated as a phone ("native app" profile). */
   mobileView?: { width: number; height: number };
+  /** "native" when the profile opens a real, resizable browser window. */
+  windowMode?: "native";
   ramMb: number; heapMb: number; autoResources: boolean; headless: true; urls: string[]; manual: boolean;
   state: "stopped" | "starting" | "running" | "manual" | "stopping" | "error";
   pid: number | null; cpuPercent: number | null; memoryMb: number | null; processCount: number | null;
@@ -125,6 +129,7 @@ export class ProcessManager {
     const basePolicy = normalizeWorkspacePolicy({ ...input.ramMb !== undefined && { ramMb: input.ramMb },
       ...input.heapMb !== undefined && { heapMb: input.heapMb }, headless: input.headless ?? true,
       autoResources: input.autoResources ?? (input.ramMb === undefined && input.heapMb === undefined),
+      ...(input.windowMode === "native" ? { windowMode: "native" as const } : {}),
       urls: input.urls ?? (input.origin ? [input.origin] : []), manual: true,
       ...(input.mobileView ? { mobileView: engine === "chromium" ? validateMobileView(input.mobileView) : (() => { throw new Error("mobile view is available for Chromium profiles only"); })() } : {}) });
     const profiles: Profile[] = [];
@@ -152,6 +157,13 @@ export class ProcessManager {
     // Choosing an explicit size switches the profile to manual sizing unless told otherwise.
     if (allowed.autoResources === undefined && (allowed.ramMb !== undefined || allowed.heapMb !== undefined)) allowed.autoResources = false;
     this.policy.set(id, allowed); this.notify(); return this.getProfile(id)!;
+  }
+  /** Switch a stopped profile between a hidden browser (dashboard view) and a real window. */
+  setWindowMode(id: string, value: unknown): WorkspaceProfileView {
+    this.assertOpen(); this.requireProfile(id);
+    if (value !== "native" && value !== "dashboard") throw new Error("window mode must be native or dashboard");
+    if (!this.canEditProfile(id)) throw new Error("stop the profile before changing its window mode");
+    this.policy.set(id, { ...this.policy.get(id), windowMode: value === "native" ? "native" : undefined }); this.notify(); return this.getProfile(id)!;
   }
   /** Switch a stopped Chromium profile between desktop view and a phone viewport. */
   setMobileView(id: string, value: unknown): WorkspaceProfileView {
@@ -255,13 +267,13 @@ export class ProcessManager {
         this.assertCanStart();
         // These trusted limits are distinct from arbitrary forwarded launch_args.
         const options: LaunchStartOptions & { networkMode?: NetworkMode; resourceLimits?: { v8OldSpaceMb: number; deviceScaleFactor: 1 } } = {
-          headless: true, autoNavigate: true, restoreLastSession: false,
+          headless: policy.windowMode !== "native", autoNavigate: true, restoreLastSession: false,
           networkMode: this.getNetworkMode(id),
           ...(profile.engine !== "firefox" ? { resourceLimits: { v8OldSpaceMb: this.budget(id, policy, true).heapMb, deviceScaleFactor: 1 } } : {}),
         };
         await this.options.launcher.start(id, policy.urls, options);
         const launch = this.getLaunch(id);
-        if (!launch || launch.headless !== true) throw new Error("workspace requires a verified headless launch generation");
+        if (!launch || launch.headless !== (policy.windowMode !== "native")) throw new Error("workspace requires a verified launch generation in the requested window mode");
         if (!previousLaunch || launchGeneration(previousLaunch) !== launchGeneration(launch)) {
           this.metrics.delete(id); this.consecutiveOverBudget.delete(id); this.budgetPaused.delete(id);
         }

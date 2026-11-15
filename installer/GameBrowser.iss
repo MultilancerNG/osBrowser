@@ -1,9 +1,9 @@
 ; GameBrowser Windows installer (Inno Setup 6).
-; Build: ISCC /DAppVersion=0.1.0-preview.4 /DSourceDir=path\to\GameBrowser /DOutputDir=dist installer\GameBrowser.iss
+; Build: ISCC /DAppVersion=0.1.0-preview.5 /DSourceDir=path\to\GameBrowser /DOutputDir=dist installer\GameBrowser.iss
 ; SourceDir must contain GameBrowser.exe plus the runtime, cloakbrowser, firefox and notices folders.
 
 #ifndef AppVersion
-  #define AppVersion "0.1.0-preview.4"
+  #define AppVersion "0.1.0-preview.5"
 #endif
 #ifndef SourceDir
   #define SourceDir "..\dist\GameBrowser"

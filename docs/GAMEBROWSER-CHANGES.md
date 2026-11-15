@@ -1,4 +1,4 @@
-GameBrowser 0.1.0-preview.4 (portable, unsigned preview)
+GameBrowser 0.1.0-preview.5 (portable, unsigned preview)
 =========================================================
 
 Start
@@ -37,8 +37,30 @@ What changed from StakeMode preview.2
   iPad mini, or custom 320-1024 x 480-2160). Chromium profiles only; stop the profile
   to change it.
 
-New in this build
------------------
+New in 0.1.0-preview.5
+----------------------
+- One admin per group: put profiles in groups (Profiles > Manage groups), pick the group in
+  the Following bar, then its admin. Each group follows only its own admin; two groups can
+  run side by side. Moving an admin into a group that already has one makes it manual.
+- Real browser windows: Create profiles or Profile settings > Window mode > "Real browser
+  window". The profile opens as a normal resizable Chrome window with every browser feature
+  (right-click, zoom, find, downloads, devtools). "Show window" brings it to the front.
+- Admin controls the layout: when the admin's window or viewport is resized, every follower
+  in its group is resized to the same page size. Full view has a Viewport bar to set it.
+- Tabs and popups follow: a new tab or popup the admin opens on stake.com opens on its
+  followers too, and closing or switching tabs is copied.
+- Menus and modals follow: hover menus and Escape (close) are mirrored, and far fewer
+  ordinary stake.com buttons are wrongly treated as sensitive.
+- Browser dialogs: alert/confirm/prompt boxes appear in Full view to answer (or natively in
+  a real window). The admin's answer is applied to the same box on its followers.
+- Full view works like a browser: drag and text selection, double-click, right-click,
+  keyboard shortcuts (Ctrl+C/A/Z, F5...), Ctrl+wheel zoom, zoom buttons, Find on page,
+  file uploads (up to 700 KB; real windows have no limit) and downloads saved to
+  Downloads\GameBrowser\<profile>.
+- The admin keeps leading while it opens, switches or closes tabs.
+
+Earlier in preview.4
+--------------------
 - New layout: stats bar (profiles, running, CPU, RAM), a Following bar, and grid/list
   switch. Admin tile has a purple border, followers teal.
 - Full Admin View: browser frame with "Admin · N followers connected" and a Followers strip

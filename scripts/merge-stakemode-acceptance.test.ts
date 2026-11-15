@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BROWSER_CHECKS, INSTALLED_CHECK, MAX_REPORT_BYTES, mergeAcceptance, mergeAcceptanceFiles } from './merge-stakemode-acceptance.mjs';
 
-const SOURCE = 'a'.repeat(40), VERSION = '0.1.0-preview.4';
+const SOURCE = 'a'.repeat(40), VERSION = '0.1.0-preview.5';
 const hash = (character: string) => character.repeat(64);
 function fixtures(): { browser: any; installed: any } {
   const identity = { product: 'StakeMode', version: VERSION, source: SOURCE, platform: 'win32', architecture: 'x64', passed: true, cleanupConfirmed: true };

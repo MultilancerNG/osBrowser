@@ -1,7 +1,9 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { Browser, BrowserContext, Page } from "playwright-core";
+import type { Browser, BrowserContext, Dialog, FileChooser, Page } from "playwright-core";
+import { mkdirSync } from "node:fs";
+import { homedir } from "node:os";
 import type { LaunchInfo } from "../types.ts";
 import { callFirefoxOwner } from "../firefox-runtime.ts";
 import { resolvePlaywrightRuntime } from "../playwright-runtime.ts";
@@ -12,9 +14,21 @@ import type { RelayTransport } from "./syncRelay.ts";
 import { validateDesktopScreen, validateMobileView } from "./displayPolicy.ts";
 
 interface TrackedTab { id: string; page: Page; title: string; loading: boolean; viewportReady: Promise<void>; quarantined: boolean; }
+/** A browser alert/confirm/prompt waiting for an answer. */
+export interface PendingDialog { id: string; type: string; message: string; defaultValue: string; dialog: Dialog; at: number; }
+export interface DialogInfo { id: string; type: string; message: string; defaultValue: string; }
+export interface DialogAnswer { type: string; message: string; accept: boolean; text?: string; }
+const dialogText = (value: string, limit: number) => String(value ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, limit);
+/** Bounds for a mirrored administrator viewport (CSS pixels). */
+export function validateLayout(value: unknown): { width: number; height: number } {
+  const v = value as { width?: unknown; height?: unknown } | null;
+  const width = Number(v?.width), height = Number(v?.height);
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 200 || width > 7680 || height < 150 || height > 4320) throw new Error("Viewport size must be 200-7680 x 150-4320 pixels");
+  return { width, height };
+}
 class NavigationCancelled extends Error { constructor() { super("Browser navigation cancelled"); this.name = "NavigationCancelled"; } }
 interface PendingNavigation { controller: AbortController; }
-interface Connection { browser: Browser; context: BrowserContext; page?: Page; viewport?: { width: number; height: number; mobile?: boolean }; busy: boolean; stopEpoch: number; navigations: Map<Page, PendingNavigation>; geometryEpoch: number; generation: string; transport?: RelayTransport; geometry?: { page: Page; width: number; height: number; at: number; url: string }; tabs: Map<string, TrackedTab>; tabIds: Map<Page, string>; pendingTabs: number; tabQueue: Promise<void>; trustedExtensionOrigins: Set<string>; stateTimer?: ReturnType<typeof setTimeout>; browserError?: string; firefoxPublish?: (page: Page) => void; }
+interface Connection { dialogs?: Map<string, PendingDialog>; fileChooser?: FileChooser; browser: Browser; context: BrowserContext; page?: Page; viewport?: { width: number; height: number; mobile?: boolean }; busy: boolean; stopEpoch: number; navigations: Map<Page, PendingNavigation>; geometryEpoch: number; generation: string; transport?: RelayTransport; geometry?: { page: Page; width: number; height: number; at: number; url: string }; tabs: Map<string, TrackedTab>; tabIds: Map<Page, string>; pendingTabs: number; tabQueue: Promise<void>; trustedExtensionOrigins: Set<string>; stateTimer?: ReturnType<typeof setTimeout>; browserError?: string; firefoxPublish?: (page: Page) => void; }
 interface BridgeOptions {
   getLaunch(profileId: string): LaunchInfo | null;
   getConfig(profileId: string): SyncProfileConfig | undefined;
@@ -30,6 +44,14 @@ interface BridgeOptions {
   onBrowserState?(state: ProfileBrowserState): void;
   /** command is passed for browser-bar actions so the administrator can keep leading inside its site. */
   beforeBrowserAction?(profileId: string, command?: { action: string; url?: string }): void;
+  /** A page in this profile opened a JavaScript dialog. */
+  onDialog?(profileId: string, dialog: DialogInfo): void;
+  /** A dialog was answered (by the operator, natively, or by mirroring). */
+  onDialogClosed?(profileId: string, dialogId: string, answer: DialogAnswer): void;
+  /** A page asked for a file (hidden browsers only; real windows show the native picker). */
+  onFileChooser?(profileId: string, request: { multiple: boolean }): void;
+  /** A download finished and was saved to disk. */
+  onDownload?(profileId: string, download: { name: string; path: string } | { name: string; error: string }): void;
   contentScriptPath?: string;
   connect?: (launch: LaunchInfo) => Promise<Browser>;
 }
@@ -223,6 +245,9 @@ export class BrowserBridge {
         }
         this.publishBrowserState(profileId, connection);
       });
+      page.on("dialog", dialog => this.handleDialog(profileId, connection, dialog));
+      page.on("filechooser", chooser => { if (!connection.viewport) return; connection.fileChooser = chooser; this.options.onFileChooser?.(profileId, { multiple: chooser.isMultiple() }); });
+      page.on("download", download => { void this.saveDownload(profileId, download); });
       page.on("crash", () => { tab.loading = false; connection.browserError = "This tab stopped responding. Reload or close it to continue."; this.publishBrowserState(profileId, connection); });
     }
     void this.refreshTitle(profileId, connection, tab);
@@ -255,7 +280,7 @@ export class BrowserBridge {
     if (this.connections.get(profileId) !== connection || tab.quarantined) return;
     tab.quarantined = true; tab.loading = false; this.cancelNavigation(connection, tab.page); this.invalidateGeometry(connection);
     connection.browserError = "The new tab's desktop viewport could not be prepared. Close it or restart this profile.";
-    this.options.beforeBrowserAction?.(profileId); this.publishBrowserState(profileId, connection);
+    this.publishBrowserState(profileId, connection); // a failed tab is closed; it is not an operator action
     void bounded(tab.page.close({ runBeforeUnload: false }), 3000).catch(() => {});
   }
   private async refreshTitle(profileId: string, connection: Connection, tab: TrackedTab): Promise<void> {
@@ -634,8 +659,142 @@ export class BrowserBridge {
     const page = connection.page && !connection.page.isClosed() ? connection.page : connection.context.pages().find(candidate => !candidate.isClosed());
     if (!page) return;
     if (publicPageUrl(page.url()) === `${target.origin}${target.pathname}`) return;
+    const existing = [...connection.tabs.values()].find(tab => !tab.page.isClosed() && !tab.quarantined && publicPageUrl(tab.page.url()) === `${target.origin}${target.pathname}`);
+    if (existing) { await bounded(existing.page.bringToFront(), 3000).catch(() => {}); this.selectPage(profileId, connection, existing.page); return; }
     try { await this.navigatePage(profileId, connection, page, target.href); }
     catch { /* A cancelled or failed follow is retried on the next administrator page change. */ }
+  }
+  /** Resize a profile to the administrator's viewport: the viewport of a hidden browser,
+   * or the real window of a native one (so the page gets the same CSS size). */
+  async applyLayout(profileId: string, value: { width: number; height: number }): Promise<void> {
+    const connection = this.connections.get(profileId);
+    if (!connection || this.stopped || this.suspended.has(profileId)) return;
+    if (connection.viewport?.mobile) return; // phone-view profiles keep their device size
+    const layout = validateLayout(value);
+    const page = connection.page && !connection.page.isClosed() ? connection.page : connection.context.pages().find(candidate => !candidate.isClosed());
+    if (!page) return;
+    this.invalidateGeometry(connection);
+    if (connection.viewport) {
+      connection.viewport = { width: layout.width, height: layout.height };
+      await Promise.all([...connection.tabs.values()].filter(tab => !tab.page.isClosed()).map(tab => bounded(tab.page.setViewportSize(layout), 5000).catch(() => {})));
+      return;
+    }
+    const session = await connection.context.newCDPSession(page);
+    try {
+      const target = await session.send("Browser.getWindowForTarget") as { windowId: number; bounds: { width?: number; height?: number; windowState?: string } };
+      if (target.bounds.windowState && target.bounds.windowState !== "normal") await session.send("Browser.setWindowBounds", { windowId: target.windowId, bounds: { windowState: "normal" } });
+      const fresh = await session.send("Browser.getWindowBounds", { windowId: target.windowId }) as { bounds: { width?: number; height?: number } };
+      const inner = await bounded(page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight })), 3000);
+      const width = Math.max(320, Math.round((fresh.bounds.width ?? inner.width) + layout.width - inner.width));
+      const height = Math.max(240, Math.round((fresh.bounds.height ?? inner.height) + layout.height - inner.height));
+      await session.send("Browser.setWindowBounds", { windowId: target.windowId, bounds: { width, height } });
+    } finally { await session.detach().catch(() => {}); }
+  }
+  /** Make a follower's tabs match its administrator's: open, close and select tabs (popups included). */
+  async mirrorTabs(profileId: string, wanted: { urls: string[]; active: number }): Promise<void> {
+    const connection = this.connections.get(profileId);
+    if (!connection || this.stopped || this.suspended.has(profileId)) return;
+    const config = this.options.getConfig(profileId);
+    if (!config || config.role !== "follower") return;
+    const live = () => [...connection.tabs.values()].filter(tab => !tab.page.isClosed() && !tab.quarantined);
+    const urls = wanted.urls.slice(0, MAX_BROWSER_TABS);
+    for (let index = live().length; index < urls.length; index++) {
+      let target: string | null = null;
+      try { const url = new URL(approvedUrl(urls[index], config.origins)); if (!url.search && !url.hash && !url.username && !url.password) target = url.href; } catch { target = null; }
+      if (!target) continue; // tabs outside stake.com stay with the administrator only
+      const page = await bounded(connection.context.newPage(), 10000);
+      const tab = this.trackPage(profileId, connection, page);
+      await tab.viewportReady.catch(() => {});
+      await this.navigatePage(profileId, connection, page, target).catch(() => {});
+    }
+    const tabs = live();
+    for (let index = tabs.length - 1; index >= Math.max(1, urls.length); index--) await bounded(tabs[index]!.page.close({ runBeforeUnload: false }), 5000).catch(() => {});
+    const remaining = live(), chosen = remaining[Math.max(0, Math.min(wanted.active, remaining.length - 1))];
+    if (chosen && connection.page !== chosen.page) { await bounded(chosen.page.bringToFront(), 3000).catch(() => {}); this.selectPage(profileId, connection, chosen.page); }
+  }
+  /** Public tab list (origin + path) and active index, for mirroring the administrator's tabs. */
+  tabLayout(profileId: string): { urls: string[]; active: number } | undefined {
+    const connection = this.connections.get(profileId);
+    if (!connection) return undefined;
+    const tabs = [...connection.tabs.values()].filter(tab => !tab.page.isClosed() && !tab.quarantined);
+    return { urls: tabs.map(tab => publicPageUrl(tab.page.url())), active: Math.max(0, tabs.findIndex(tab => tab.page === connection.page)) };
+  }
+  private handleDialog(profileId: string, connection: Connection, dialog: Dialog): void {
+    const type = dialog.type();
+    // Leaving a page must never hang on an unload prompt.
+    if (type === "beforeunload") { void dialog.accept().catch(() => {}); return; }
+    const pending: PendingDialog = { id: `dlg_${sessionToken().slice(0, 16)}`, type, message: dialogText(dialog.message(), 400), defaultValue: dialogText(dialog.defaultValue(), 200), dialog, at: Date.now() };
+    connection.dialogs ??= new Map();
+    if (connection.dialogs.size >= 8) { void dialog.dismiss().catch(() => {}); return; }
+    connection.dialogs.set(pending.id, pending);
+    this.options.onDialog?.(profileId, { id: pending.id, type: pending.type, message: pending.message, defaultValue: pending.defaultValue });
+    // In a real window the operator may answer the native dialog box directly; read that answer.
+    if (!connection.viewport) void this.watchNativeDialog(profileId, connection, dialog.page(), pending.id);
+  }
+  private async watchNativeDialog(profileId: string, connection: Connection, page: Page | null, dialogId: string): Promise<void> {
+    if (!page || page.isClosed()) return;
+    try {
+      const session = await connection.context.newCDPSession(page);
+      await session.send("Page.enable");
+      const done = () => { void session.detach().catch(() => {}); };
+      session.on("Page.javascriptDialogClosed", (event: { result?: boolean; userInput?: string }) => {
+        const pending = connection.dialogs?.get(dialogId);
+        if (pending) {
+          connection.dialogs!.delete(dialogId);
+          const accept = event.result === true;
+          this.options.onDialogClosed?.(profileId, dialogId, { type: pending.type, message: pending.message, accept, ...(pending.type === "prompt" && accept && typeof event.userInput === "string" ? { text: dialogText(event.userInput, 200) } : {}) });
+        }
+        done();
+      });
+      setTimeout(done, 120_000).unref?.();
+    } catch { /* Firefox has no CDP; the dashboard answer path still works. */ }
+  }
+  /** Give the page's pending file request the operator's chosen files (bounded). */
+  async provideFiles(profileId: string, files: Array<{ name: string; mimeType: string; buffer: Buffer }>): Promise<void> {
+    const connection = this.connections.get(profileId), chooser = connection?.fileChooser;
+    if (!connection || !chooser) throw new Error("This page is not asking for a file right now");
+    connection.fileChooser = undefined;
+    await bounded(chooser.setFiles(chooser.isMultiple() ? files : files.slice(0, 1)), 15000);
+  }
+  private async saveDownload(profileId: string, download: { suggestedFilename(): string; saveAs(path: string): Promise<void> }): Promise<void> {
+    const name = download.suggestedFilename().replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").replace(/^\.+/, "_").slice(0, 150) || "download";
+    try {
+      const folder = join(homedir(), "Downloads", "GameBrowser", profileId);
+      mkdirSync(folder, { recursive: true });
+      const target = join(folder, `${Date.now()}-${name}`);
+      await download.saveAs(target);
+      this.options.onDownload?.(profileId, { name, path: target });
+    } catch { this.options.onDownload?.(profileId, { name, error: "The download could not be saved" }); }
+  }
+  /** Dialogs waiting for an answer in a profile. */
+  pendingDialogs(profileId: string): DialogInfo[] {
+    return [...(this.connections.get(profileId)?.dialogs?.values() ?? [])].map(({ id, type, message, defaultValue }) => ({ id, type, message, defaultValue }));
+  }
+  /** Answer a pending dialog. A dialog already closed natively in a real window resolves quietly. */
+  async answerDialog(profileId: string, dialogId: string, accept: boolean, text?: string): Promise<boolean> {
+    const connection = this.connections.get(profileId), pending = connection?.dialogs?.get(dialogId);
+    if (!connection || !pending) return false;
+    connection.dialogs!.delete(dialogId);
+    const answer: DialogAnswer = { type: pending.type, message: pending.message, accept, ...(pending.type === "prompt" && accept && typeof text === "string" ? { text: dialogText(text, 200) } : {}) };
+    try { if (accept) await pending.dialog.accept(answer.text ?? pending.defaultValue); else await pending.dialog.dismiss(); }
+    catch { /* closed natively */ }
+    this.options.onDialogClosed?.(profileId, dialogId, answer);
+    return true;
+  }
+  /** Bring a native profile window to the front and restore it if minimized. */
+  async focusWindow(profileId: string): Promise<void> {
+    const connection = this.connections.get(profileId);
+    if (!connection || this.stopped || this.suspended.has(profileId)) throw new Error("Start this browser profile first");
+    const page = connection.page && !connection.page.isClosed() ? connection.page : connection.context.pages().find(candidate => !candidate.isClosed());
+    if (!page) throw new Error("No browser tab is open");
+    try {
+      const session = await connection.context.newCDPSession(page);
+      try {
+        const target = await session.send("Browser.getWindowForTarget") as { windowId: number };
+        await session.send("Browser.setWindowBounds", { windowId: target.windowId, bounds: { windowState: "normal" } });
+      } finally { await session.detach().catch(() => {}); }
+    } catch { /* Firefox or a hidden browser: bringToFront below still selects the tab. */ }
+    await bounded(page.bringToFront(), 5000);
   }
   /** Server-initiated reload of the active page; never switches the profile to manual. */
   async reloadPage(profileId: string): Promise<boolean> {
@@ -657,7 +816,7 @@ export class BrowserBridge {
     await this.readyPage(input.profileId, connection, page);
     if (connection.page !== page) throw new Error("Browser page changed before manual input");
     if (!this.isTrustedExtensionPage(connection, page.url())) browsingUrl(page.url(), true);
-    if (input.kind === "click") {
+    if (["click", "move", "down", "up", "dblclick", "contextmenu"].includes(input.kind)) {
       let size = connection.geometry;
       if (!size || size.page !== page || size.url !== page.url() || Date.now() - size.at > 3000) {
         const geometryEpoch = connection.geometryEpoch;
@@ -667,9 +826,23 @@ export class BrowserBridge {
       }
       if (input.x! >= size.width || input.y! >= size.height) throw new Error("Click is outside the current browser viewport");
       if (!this.options.canControl(input.profileId) || this.connections.get(input.profileId) !== connection) throw new Error("This profile is no longer under direct operator control");
-      await page.mouse.click(input.x!, input.y!);
+      if (input.kind === "click") await page.mouse.click(input.x!, input.y!);
+      else if (input.kind === "move") await page.mouse.move(input.x!, input.y!);
+      else if (input.kind === "down") { await page.mouse.move(input.x!, input.y!); await page.mouse.down({ button: input.button ?? "left" }); }
+      else if (input.kind === "up") { await page.mouse.move(input.x!, input.y!); await page.mouse.up({ button: input.button ?? "left" }); }
+      else if (input.kind === "dblclick") await page.mouse.click(input.x!, input.y!, { clickCount: 2 });
+      else await page.mouse.click(input.x!, input.y!, { button: "right" });
     } else if (input.kind === "scroll") await page.mouse.wheel(input.deltaX!, input.deltaY!);
-    else if (input.kind === "key") await page.keyboard.press(input.key! === "Space" ? " " : input.key!);
+    else if (input.kind === "key") {
+      const key = input.key! === "Space" ? " " : input.key!;
+      await page.keyboard.press(input.modifiers?.length ? `${input.modifiers.join("+")}+${key}` : key);
+    } else if (input.kind === "zoom") {
+      const scale = input.scale!;
+      await bounded(page.evaluate(value => { document.documentElement.style.zoom = value === 1 ? "" : String(value); }, scale), 3000);
+      this.invalidateGeometry(connection);
+    } else if (input.kind === "find") {
+      await bounded(page.evaluate(value => { (window as unknown as { find?: (text: string, ...flags: boolean[]) => boolean }).find?.(value, false, false, true, false, false, false); }, input.text!), 3000);
+    }
     else await page.keyboard.insertText(input.text!);
   }
   async detach(profileId: string, suspend = true): Promise<void> {

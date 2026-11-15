@@ -165,11 +165,12 @@ describe('companion synchronization content script', () => {
   });
   test('pause/manual takeover cancels deferred scroll and excludes unprompted programmatic scroll', () => {
     const h = harness(); h.configure('admin');
+    const base = h.timers.size; // the admin's viewport report is pending
     h.trigger('scroll', h.document);
-    expect(h.timers.size).toBe(0);
+    expect(h.timers.size).toBe(base);
     h.trigger('wheel', h.document);
     h.trigger('scroll', h.document);
-    expect(h.timers.size).toBe(1);
+    expect(h.timers.size).toBe(base + 1);
     h.configure('manual', 8);
     expect(h.timers.size).toBe(0);
     h.configure('admin', 9, { paused: true });

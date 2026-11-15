@@ -1,6 +1,8 @@
 /** Fail-closed policy shared by the relay and browser bridge. No credential or
  * financial interaction is eligible for automatic synchronization. */
-export const ACTION_TYPES = ['click', 'input', 'scroll'] as const;
+export const ACTION_TYPES = ['click', 'input', 'scroll', 'hover', 'key'] as const;
+/** The only key mirrored to followers: it closes menus and modals and cannot submit anything. */
+export const MIRRORED_KEYS = ['Escape'] as const;
 export type ActionKind = typeof ACTION_TYPES[number];
 export type TargetFingerprint = {
   tag: string;
@@ -40,7 +42,7 @@ export const actionPolicy = Object.freeze({
 
 // Deliberately includes related verbs and fields: a betting amount input is as
 // sensitive as the button that submits it. Separators also match DOM attributes.
-export const sensitiveTargetPattern = /(?:^|[^a-z0-9])(?:pass(?:word|code)?|pwd|secret|token|api[\s_-]*key|auth(?:entication|orize|orisation|orization)?|log[\s_-]*in|sign[\s_-]*in|sign[\s_-]*up|register|credential|username|user[\s_-]*name|email|phone|pin|code|otp|2fa|mfa|two[\s_-]*factor|verification|verify|captcha|turnstile|hcaptcha|recaptcha|challenge|deposit|withdraw(?:al)?|payout|payment|pay|purchase|buy|sell|checkout|wallet|bank|card|amount|stake|wager|bet(?:s|ting)?|place[\s_-]*bet|cash[\s_-]*out|trade|transfer|send[\s_-]*money|tip)(?:$|[^a-z0-9])/i;
+export const sensitiveTargetPattern = /(?:^|[^a-z0-9])(?:pass(?:word|code)?|pwd|secret|token|api[\s_-]*key|auth(?:entication|orize|orisation|orization)?|log[\s_-]*in|sign[\s_-]*in|sign[\s_-]*up|register|credential|username|user[\s_-]*name|email|phone|pin|(?:promo|bonus|verification|security|auth|sms|2fa)[\s_-]*code|one[\s_-]*time|otp|2fa|mfa|two[\s_-]*factor|verification|verify|captcha|turnstile|hcaptcha|recaptcha|challenge|deposit|withdraw(?:al)?|payout|payment|pay|purchase|buy|sell|checkout|wallet|bank|card|amount|wager|stake[\s_-]*(?:amount|input|value|size)|place[\s_-]*(?:a[\s_-]*)?bets?|bet[\s_-]*(?:slip|amount|now|button|input|value|size)|(?:max|min|auto)[\s_-]*bet|cash[\s_-]*out|trade|transfer|send[\s_-]*money|tip)(?:$|[^a-z0-9])/i;
 const sensitivePathPattern = /(?:^|\/)(?:login|sign[-_]?in|sign[-_]?up|register|auth|oauth|verify|verification|2fa|mfa|captcha|challenge|deposit|withdraw(?:al)?|payout|payment|checkout|wallet|cashier)(?:\/|$)/i;
 const forbiddenInputTypes = new Set(['password', 'email', 'tel', 'number', 'file', 'hidden', 'submit', 'button', 'image']);
 const actionKeys = new Set(['type', 'id', 'seq', 'epoch', 'origin', 'url', 'action', 'selector', 'value', 'x', 'y', 'fingerprint']);
@@ -87,6 +89,11 @@ export function validateActionPacket(value: unknown, context: ActionContext = {}
     const page = new URL(value.url);
     if (page.origin !== origin || page.username || page.password || page.hash || page.search || sensitivePathPattern.test(page.pathname)) return reject('Sensitive or mismatched page URL');
   } catch { return reject('Invalid page URL'); }
+  if (value.action === 'key') {
+    if (value.selector !== undefined || value.fingerprint !== undefined || value.x !== undefined || value.y !== undefined) return reject('Unexpected key fields');
+    if (!(MIRRORED_KEYS as readonly unknown[]).includes(value.value)) return reject('Only Escape is mirrored');
+    return { ok: true, action: value as ActionPacket };
+  }
   if (value.action === 'scroll') {
     if (value.selector !== undefined || value.fingerprint !== undefined || value.value !== undefined) return reject('Unexpected scroll fields');
     if (![value.x, value.y].every((v) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1_000_000)) return reject('Invalid scroll position');
@@ -106,7 +113,7 @@ export function validateActionPacket(value: unknown, context: ActionContext = {}
     if (value.action === 'input') {
       if (!['input', 'textarea'].includes(value.fingerprint.tag)) return reject('Input target is not editable');
       if (!boundedString(value.value, Math.min(context.maxValueLength ?? actionPolicy.maxValueLength, actionPolicy.maxValueLength))) return reject('Input exceeds limit');
-    } else if (value.value !== undefined) return reject('Unexpected click value');
+    } else if (value.value !== undefined) return reject('Unexpected click or hover value');
   }
   return { ok: true, action: value as ActionPacket };
 }

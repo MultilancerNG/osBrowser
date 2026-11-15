@@ -42,3 +42,4 @@ workspace-state/
 # build outputs
 dist/
 site/*.zip
+*.bun-build
